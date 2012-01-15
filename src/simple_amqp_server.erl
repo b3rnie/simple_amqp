@@ -73,7 +73,9 @@ init(Args) ->
       {ok, #s{ channels           = orddict:new()
              , connection_pid     = Connection
              , connection_monitor = Monitor
-             }}
+             }};
+    {error, Rsn} ->
+      {stop, Rsn}
   end.
 
 handle_call({subscribe, Pid, Queue}, From, #s{} = S0) ->
@@ -125,8 +127,7 @@ terminate(_Reason, #s{connection = Connection}) ->
   orddict:fold(fun({Pid, CPid}, _) ->
                    simple_amqp_channel:stop(CPid)
                end, '_', Pids),
-  amqp_connection:close(Connection),
-  ok.
+  ok = amqp_connection:close(Connection).
 
 code_change(_OldVsn, #s{} = S, _Extra) ->
   {ok, S}.

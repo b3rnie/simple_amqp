@@ -35,8 +35,11 @@
            , client_monitor
            , channel_monitor
            , channel_pid
-           , subscriptions %% {queue, consumer_tag}
+           , subscriptions   :: orddict()
            }).
+
+-record(sub, { state %% setup, open, close
+             }).
 
 %%%_ * API -------------------------------------------------------------
 start(Args)      -> gen_server:start(?MODULE, Args, []).
@@ -62,8 +65,10 @@ init(Args) ->
              , client_monitor  = erlang:monitor(process, ClientPid)
              , channel_pid     = ChannelPid
              , channel_monitor = erlang:monitor(process, ChannelPid)
-             , subscriptions   = []
-             }}
+             , subscriptions   = orddict:new()
+             }};
+    {error, Rsn} ->
+      {stop, Rsn}
   end.
 
 handle_cast(stop, S) ->
@@ -71,19 +76,22 @@ handle_cast(stop, S) ->
 
 handle_cast({subscribe, From, Queue},
             #s{subscriptions = Subscriptions} = S) ->
-  case lists:keymember(Queue, 1, Subscriptions) of
-    true ->
+  case orddict:find(Queue, Subscriptions0) of
+    {ok, #sub{}} ->
       gen_server:reply(From, {error, already_subscribed}),
       {noreply, S};
-    false ->
+    error ->
       amqp_channel:call(Channel, #'basic.qos'{prefetch_count = 1}),
       #'basic.consume_ok'{consumer_tag = Tag} =
         amqp_channel:call(Channel,
                           #'basic.consume'{ queue = Queue
                                           , consumer_tag = <<"foo">>
                                           }),
+      Sub = #sub{state = {setup, From, Tag}},
+      Subscriptions = orddict:store(Queue, Sub),
+      {noreply, S#s{subscriptions = Subscriptions}}
+
       gen_server:reply(From, {ok, self()}),
-      {noreply, S#s{subscriptions = [{Queue,Tag} | Subscriptions]}}
   end;
 
 handle_cast({unsubscribe, From, Queue},
@@ -117,36 +125,47 @@ handle_cast({publish, From, Exchange, RoutingKey, PayLoad},
   gen_server:reply(From, ok),
   {noreply, S};
 
-handle_info(#'basic.consume_ok'{}, S) ->
+handle_info(#'basic.consume_ok'{consumer_tag = Queue},
+            #s{subscriptions = Subscriptions0} = S) ->
+  #sub{state = {setup, From, Tag}} = orddict:fetch(Queue, Subscriptions0),
+  gen_server:reply(From, {ok, self()}),
+  Subscriptions = orddict:store(#sub{state = open}, Subscriptions0),
+  {noreply, S#s{subscriptions = Subscriptions}};
+
+handle_info(#'basic.cancel_ok'{consumer_tag = Queue},
+            #s{subscriptions = Subscriptions0} = S) ->
+  #sub{state = {close, From}} = orddict:fetch(Queue, Subscriptions0),
+  gen_server:reply(From, ok),
+  Subscriptions = orddict:erase(Queue, Subscriptions0),
+  {noreply, S#s{subscriptions = Subscriptions}};
+
+handle_info({#'basic.deliver'{delivery_tag = Tag}, Content},
+            #s{client_pid = ClientPid} = S) ->
+  ClientPid ! {msg, Tag, Content},
   {noreply, S};
 
-handle_info(#'basic.cancel_ok'{}, S) ->
-  {noreply, S};
-
-handle_info({#'basic.deliver'{}, Content}, S) ->
-  {noreply, S};
-
-handle_info(#'basic.raturn'{ reply_text = <<"unroutable">>
-                           , exchange = Exchange}, S) ->
-  %% Do something with the returned message
-  {noreply, S}
+handle_info({#'basic.raturn'{ reply_text = <<"unroutable">>
+                            , exchange   = Exchange}, Content}, S) ->
+  %% slightly drastic for now.
+  {stop, {unroutable, Exchange, Content}};
 
 handle_info({ack, Tag}, #s{channel_pid = ChannelPid} = S) ->
-  amqp_channel:cast(ChannelPid, #'basic.ack'{delivery_tag = Tag}),
+  Method = #'basic.ack'{delivery_tag = Tag},
+  amqp_channel:cast(ChannelPid, Method),
   {noreply, S};
 
 handle_info({'DOWN', ChannelRef, process, ChannelPid, Rsn},
             #s{ channel_pid     = ChannelPid
               , channel_monitor = ChannelRef} = S) ->
-  simple_amqp_server:cleanup(S#s.client_pid),
-  {noreply, S};
+  %%simple_amqp_server:cleanup(S#s.client_pid),
+  %%{noreply, S};
+  {stop, Rsn, S};
 
 handle_info({'DOWN', ClientRef, process, ClientPid, Rsn},
             #s{ client_pid     = ClientPid
               , client_monitor = ClientRef} = S) ->
   simple_amqp_server:cleanup(ClientPid),
   {noreply, S};
-
 
 handle_info(_Info, S) ->
   {noreply, S}.
