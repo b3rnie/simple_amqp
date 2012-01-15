@@ -11,7 +11,7 @@
 -export([ start/1
         , start_link/1
         , stop/0
-
+        , stop_async/0
         , subscribe/2
         , unsubscribe/2
         , publish/4
@@ -35,11 +35,14 @@
 
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
--record(s, { pids
-           , connection_pid
-           , connection_mon
+-record(s, { channels           :: orddict()
+           , connection_pid     :: pid()
+           , connection_monitor :: monitor()
            }).
 
+-record(channel, { pid     :: pid()
+                 , monitor :: monitor()
+                 }).
 %%%_ * API -------------------------------------------------------------
 start(Args) ->
   gen_server:start({local, ?MODULE}, ?MODULE, Args, []).
@@ -48,6 +51,9 @@ start_link(Args) ->
   gen_server:start_link({local, ?MODULE}, ?MODULE, Args, []).
 
 stop() ->
+  gen_server:call(?MODULE, stop).
+
+stop_async() ->
   gen_server:cast(?MODULE, stop).
 
 subscribe(Pid, Queue) ->
@@ -56,64 +62,82 @@ subscribe(Pid, Queue) ->
 unsubscribe(Pid, Queue) ->
   gen_server:call(?MODULE, {unsubscribe, Pid, Queue}).
 
-publish(Pid, Exchange, RoutingKey, Msg) ->
-  gen_server:call(?MODULE, {publish, Pid, Exchange, RoutingKey, Msg}).
+publish(Pid, Exchange, RoutingKey, Payload) ->
+  gen_server:call(?MODULE, {publish, Pid, Exchange, RoutingKey, Payload}).
 
 cleanup(Pid) ->
-  gen_server:call(?MODULE, {unregister, Pid}).
+  gen_server:call(?MODULE, {cleanup, Pid}).
+
+cleanup_async(Pid) ->
+  gen_server:cast(?MODULE, {cleanup_async, Pid}).
 
 %%%_ * gen_server callbacks --------------------------------------------
 init(Args) ->
-  Params = params(Args),
-
-  {username          = <<"guest">>,
-                             virtual_host      = <<"/">>,
-                             node              = node(),
-                             adapter_info      = none,
-                             client_properties = []}).
-
-  Params = #amqp_params_direct{ username = orddict:fetch(username)
-                              , virtual_host = orddict:fetch(virtual_host, '/'
-                              , node = node()
-                              , client_properties = []
-                              },
-  {ok, Connection} = amqp_connection:start(params(Args)),
-  {ok, #s{ pids           = orddict:new()
-         , connection_pid = Connection
-         , connection_mon = erlang:monitor(Connection)}}.
+  case amqp_connection:start(params(Args)) of
+    {ok, Connection} ->
+      Monitor = erlang:monitor(process, Connection),
+      {ok, #s{ channels           = orddict:new()
+             , connection_pid     = Connection
+             , connection_monitor = Monitor
+             }}
+  end.
 
 handle_call({subscribe, Pid, Queue}, From, #s{} = S0) ->
   {CPid, S} = maybe_new(Pid, S0),
   simple_amqp_channel:subscribe(CPid, From, Queue),
   {noreply, S};
 
-handle_call({unsubscribe, Pid, Queue}, From, #s{} = S) ->
+handle_call({unsubscribe, Pid, Queue}, From, S) ->
   case orddict:find(Pid, S#s.pids) of
     {ok, CPid} -> simple_amqp_channel:unsubscribe(CPid, From, Queue),
                   {noreply, S};
-    error -> {reply, {error, no_subscription}, S}
+    error      -> {reply, {error, no_subscription}, S}
   end;
 
-handle_call({publish, Pid, Exchange, RoutingKey, Msg},
-            From, #s{} = S0) ->
+handle_call({publish, Pid, Exchange, RoutingKey, Msg}, From, S0) ->
   {CPid, S} = maybe_new(Pid, S0),
   simple_amqp_channel:publish(Pid, From, Exchange, RoutingKey, Msg),
   {noreply, S}.
 
-handle_call({unregister, Pid}, _From, #s{} = S) ->
-  erlang:unlink(Pid),
-  Pids = orddict:erase(Pid, S#s.pids),
-  {reply, ok, S#s{pids = Pids}}.
+handle_call({cleanup, Pid}, From, S) ->
+  case delete(Pid, S0) of
+    {ok, S} -> {reply, ok, S};
+    {error, Rsn} -> {reply, {error, Rsn}, S0}
+  end;
+
+  S = maybe_delete(Pid, S0),
+  
+  case orddict:find(Pid, S#s.channels) of
+    {ok, #channel{ pid     = CPid,
+                 , monitor = CMon}} ->
+      erlang:demonitor(CMon, [flush]),
+      
+
+simple_amqp_channel:stop_async(CPid, From),
+                  Channels = orddict:erase(Pid, 
+                  Pids = orddict:erase(Pid, S#s.pids),
+                  {noreply, S#s{pids = Pids}};
+    error      -> {reply, ok, S}
+  end;
+
+handle_call(stop, _From, S) ->
+  {stop, normal, S}.
+
+handle_cast({cleanup_async, Pid}, S0}) ->
 
 handle_cast(stop, #s{} = S) ->
   {stop, normal, S}.
 
-handle_info({'DOWN', Mon, process, Pid, Rsn},
-            #s{ connection_pid = Pid
-              , connection_mon = Mon} = S) ->
+handle_info({'DOWN', Monitor, process, Pid, Rsn},
+            #s{ connection_pid     = Pid
+              , connection_monitor = Monitor
+              } = S) ->
+  true = Rsn /= normal,
   {stop, Rsn, S};
 
-handle_info({'EXIT', Pid, Rsn}, #s{pids = Pids} = S) ->
+handle_info({'DOWN', Monitor, process, Pid, Rsn}, S) ->
+  true = Rsn /= normal,
+  {stop, Rsn, S}
   Pids = orddict:erase(Pid, S#s.pids),
   {noreply, S#s{pids = Pids}};
 
@@ -132,17 +156,28 @@ code_change(_OldVsn, #s{} = S, _Extra) ->
 
 %%%_ * Internals -------------------------------------------------------
 maybe_new(Pid, S0) ->
-  case orddict:find(Pid, S0#s.pids) of
-    {ok, CPid} -> {CPid, S0};
-    error      ->
+  case orddict:find(Pid, S0#s.channels) of
+    {ok, #channel{pid = CPid}} -> {CPid, S0};
+    error                      ->
       Args = orddict:from_list([ {pid, Pid}
                                , {connection, S#s.connection}
-                               ],
-      {ok, CPid} = simple_amqp_channel:spawn_link(Args),
-      Pids = orddict:store(Pid, CPid, S0#s.pids),
-      {CPid, S0#s{pids = Pids}}
+                               ]),
+      {ok, CPid} = simple_amqp_channel:spawn(Args),
+      Monitor    = erlang:monitor(process, CPid),
+      Channels   = orddict:store(Pid, #channel{ pid = CPid
+                                              , monitor = Monitor},
+                                 S0#s.channels),
+      {CPid, S0#s{channels = Channels}}
   end.
 
+params(Args) ->
+  F = fun(K) -> orddict:fetch(K, Args) end,
+  #amqp_params_direct{ username          = F(username)
+                     , virtual_host      = F(virtual_host)
+                     , node              = F(node)
+                     , adapter_info      = F(adapter_info)
+                     , client_properties = F(client_properties)
+                     }.
 %%%_* Emacs ============================================================
 %%% Local Variables:
 %%% allout-layout: t

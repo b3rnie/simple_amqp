@@ -8,7 +8,8 @@
 -module(simple_amqp_channel).
 
 %%%_* Exports ==========================================================
--export([ start_link/1
+-export([ start/1
+        , start_link/1
         , stop/0
         , subscribe/3
         , unsubscribe/3
@@ -31,17 +32,15 @@
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
 -record(s, { pid
-           , ref
-           , connection
+           , monitor
            , channel
            }).
 
 %%%_ * API -------------------------------------------------------------
-start_link(Args) ->
-  gen_server:start_link(?MODULE, Args, []).
-
-stop(Pid) ->
-  gen_server:cast(Pid, stop).
+start(Args)      -> gen_server:start(?MODULE, Args, []).
+start_link(Args) -> gen_server:start_link(?MODULE, Args, []).
+stop(Pid)        -> gen_server:call(Pid, stop).
+stop_async(Pid)  -> gen_server:cast(Pid, stop).
 
 subscribe(Pid, From, Queue) ->
   gen_server:cast(Pid, {subscribe, From, Queue}).
@@ -54,23 +53,31 @@ publish(Pid, From, Exchange, RoutingKey, Msg) ->
 
 %%%_ * gen_server callbacks --------------------------------------------
 init(Args) ->
-  Pid           = orddict:fetch(pid, Args),
-  Connection    = orddict:fetch(connection, Args),
-  Mon           = erlang:monitor(process, Pid),
-  {ok, Channel} = amqp_connection:open_channel(Connection)
-  {ok, #s{ pid = Pid
-         , mon = Mon
-         , connection = Connection
-         , channel    = Channel
-         }}.
+  Connection = orddict:fetch(connection, Args),
+  case amqp_connection:open_channel(Connection) of
+    {ok, Channel} ->
+      Pid = orddict:fetch(pid, Args),
+      {ok, #s{ pid        = Pid
+             , monitor    = erlang:monitor(process, Pid)
+             , connection = orddict:fetch(connection, Args)
+             , channel    = Channel
+             }}
+  end.
 
-handle_call(_, _From, #s{} = S) ->
-  {reply, ok, S}.
+handle_call(stop, _From, S) ->
+  {stop, normal, S}.
 
 handle_cast(stop, #s{} = S) ->
   {stop, normal, S};
 
 handle_cast({subscribe, From, Queue}, #s{} = S) ->
+  amqp_channel:call(Channel, #'basic.qos'{prefetch_count = 1}),
+  #'basic.consume_ok'{consumer_tag = Tag} =
+    amqp_channel:subscribe(Channel,
+                           #'basic.consume'{ queue = Queue
+                                           , consumer_tag = <<"foo">>
+                                         , 
+                         
   gen_server:reply(From, ok),
   {noreply, S};
 
@@ -78,15 +85,44 @@ handle_cast({unsubscribe, From, Queue}, #s{} = S) ->
   gen_server:reply(From, ok),
   {noreply, S};
 
-handle_cast({publish, From, Exchange, RoutingKey, Msg}, #s{} = S) ->
+handle_cast({publish, From, Exchange, RoutingKey, PayLoad},
+            #s{channel = Channel} = S) ->
+  amqp_channel:cast(Channel,
+                    #'basic.publish'{ exchange    = Exchange
+                                    , routing_key = RoutingKey
+                                    },
+                    #amqp_msg{payload = Payload}
+                    ),
   gen_server:reply(From, ok),
-  {noreply, S}.
+  {noreply, S};
+
+handle_info(#'basic.consume_ok'{}, S) ->
+  {noreply, S};
+
+handle_info(#'basic.cancel_ok'{}, S) ->
+  {noreply, S};
+
+handle_info({#'basic.deliver'{}, Content}, S) ->
+  {noreply, S};
 
 handle_info({'DOWN', Ref, process, Pid, Rsn}, #s{ pid = Pid
                                                 , ref = Ref} = S) ->
-  {stop, normal, S}.
+  erlang:demonitor(Ref, [flush]),
+  simple_amqp_server:cleanup_async(Pid),
+  {noreply, S};
 
+
+
+handle_info(_Info, S) ->
+  {noreply, S}.
 
 terminate(_Reason, #s{channel = Channel}) ->
+  amqp_channel:call(Channel, #'basic.cancel'{consumer_tag = Tag}),
   amqp_channel:close(Channel),
   ok.
+
+%%%_* Emacs ============================================================
+%%% Local Variables:
+%%% allout-layout: t
+%%% erlang-indent-level: 2
+%%% End:
