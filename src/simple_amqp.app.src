@@ -1,0 +1,9 @@
+%%-*- erlang-indent-level: 2 -*-
+{application, simple_amqp,
+ [ {description, ""}
+ , {vsn, "0.1"}
+ , {registered, []}
+ , {mod, {simple_amqp_app, []}}
+ , {applications, [kernel, stdlib]}
+ , {env, []}
+]}.
