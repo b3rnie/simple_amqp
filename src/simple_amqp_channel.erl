@@ -31,11 +31,11 @@
 
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
--record(s, { client_pid
-           , client_monitor
-           , channel_monitor
-           , channel_pid
-           , subscriptions   :: orddict()
+-record(s, { client_pid      :: pid()
+           , client_monitor  :: monitor()
+           , channel_pid     :: pid()
+           , channel_monitor :: monitor()
+           , subs            :: orddict()
            }).
 
 -record(sub, { state %% setup, open, close
@@ -57,15 +57,15 @@ publish(Pid, From, Exchange, RoutingKey, Msg) ->
 
 %%%_ * gen_server callbacks --------------------------------------------
 init(Args) ->
-  Connection = orddict:fetch(connection, Args),
-  case amqp_connection:open_channel(Connection) of
+  ConnectionPid = orddict:fetch(connection_pid, Args),
+  case amqp_connection:open_channel(ConnectionPid) of
     {ok, ChannelPid} ->
       ClientPid = orddict:fetch(client_pid, Args),
       {ok, #s{ client_pid      = ClientPid
              , client_monitor  = erlang:monitor(process, ClientPid)
              , channel_pid     = ChannelPid
              , channel_monitor = erlang:monitor(process, ChannelPid)
-             , subscriptions   = orddict:new()
+             , subs            = orddict:new()
              }};
     {error, Rsn} ->
       {stop, Rsn}
@@ -75,83 +75,94 @@ handle_cast(stop, S) ->
   {stop, normal, S};
 
 handle_cast({subscribe, From, Queue},
-            #s{subscriptions = Subscriptions} = S) ->
-  case orddict:find(Queue, Subscriptions0) of
-    {ok, #sub{}} ->
-      gen_server:reply(From, {error, already_subscribed}),
+            #s{subs = Subs0} = S) ->
+  case orddict:find(Queue, Subs0) of
+    {ok, #sub{state = open}} ->
+      %% gen_server:reply(From, {error, already_subscribed}),
+      gen_server:reply(From, {ok, self()}),
+      {noreply, S};
+    {ok, #sub{state = {setup, _From}}} ->
+      gen_server:reply(From, {error, setup_in_progress}),
+      {noreply, S};
+    {ok, #sub{state = {close, _From}}} ->
+      gen_server:reply(From, {error, close_in_progress}),
       {noreply, S};
     error ->
-      amqp_channel:call(Channel, #'basic.qos'{prefetch_count = 1}),
-      #'basic.consume_ok'{consumer_tag = Tag} =
-        amqp_channel:call(Channel,
-                          #'basic.consume'{ queue = Queue
-                                          , consumer_tag = <<"foo">>
-                                          }),
-      Sub = #sub{state = {setup, From, Tag}},
-      Subscriptions = orddict:store(Queue, Sub),
-      {noreply, S#s{subscriptions = Subscriptions}}
-
-      gen_server:reply(From, {ok, self()}),
+      Qos = #'basic.qos'{prefetch_count = 1},
+      amqp_channel:call(Channel, Qos),
+      Consume = #'basic.consume'{ queue        = Queue
+                                , consumer_tag = Queue
+                                },
+      #'basic.consume_ok'{consumer_tag = Queue} =
+        amqp_channel:call(Channel, Consume),
+      Sub  = #sub{state = {setup, From}},
+      Subs = orddict:store(Queue, Sub, Subs0),
+      {noreply, S#s{subs = Subs}}
   end;
 
 handle_cast({unsubscribe, From, Queue},
             #s{ channel_pid   = ChannelPid
-              , subscriptions = Subscriptions0} = S) ->
-  case lists:keytake(Queue, 1, Subscriptions0) of
-    {value, {Queue, ConsumerTag}, Subscriptions} ->
-      amqp_channel:call(ChannelPid,
-                        #'basic.cancel'{consumer_tag = ConsumerTag}),
-      gen_server:reply(From, ok),
-      {noreply, S#s{subscriptions = Subscriptions}};
-    false ->
+              , subs          = Subs0} = S) ->
+  case orddict:fetch(Queue, Subscriptions0) of
+    #sub{state = {close, _From}} ->
+      gen_server:reply(From, {error, close_in_progress}),
+      {noreply, S};
+    #sub{state = {setup, _From}} ->
+      gen_server:reply(From, {error, setup_in_progress}),
+      {noreply, S};
+    #sub{state = open} = Sub ->
+      Cancel = #'basic.cancel'{consumer_tag = Queue},
+      amqp_channel:call(ChannelPid, Cancel),
+      Subs = orddict:store(Queue, Sub#sub{state = {close, From}}, Subs0),
+      {noreply, S#s{subs = Subs}};
+    error ->
       gen_server:reply(From, {error, not_subscribed}),
       {noreply, S}
   end;
 
 handle_cast({publish, From, Exchange, RoutingKey, PayLoad},
-            #s{channel = Channel} = S) ->
-  Method =
-    #'basic.publish'{ exchange    = Exchange
-                    , routing_key = RoutingKey
-                    , mandatory   = true
-                    , immediate   = true
-                    },
+            #s{channel_pid = ChannelPid} = S) ->
+  Publish = #'basic.publish'{ exchange    = Exchange
+                            , routing_key = RoutingKey
+                            , mandatory   = true
+                            , immediate   = true
+                            },
   Props = #'P_basic'{delivery_mode = 2}, %% 1 not persistent
                                          %% 2 persistent
   Msg = #amqp_msg{ payload = Payload
                  , props   = Props
                  },
-  amqp_channel:call(Channel, Method, Msg),
+  amqp_channel:call(Channel, Publish, Msg),
   gen_server:reply(From, ok),
   {noreply, S};
 
 handle_info(#'basic.consume_ok'{consumer_tag = Queue},
-            #s{subscriptions = Subscriptions0} = S) ->
-  #sub{state = {setup, From, Tag}} = orddict:fetch(Queue, Subscriptions0),
+            #s{subs = Subs0} = S) ->
+  #sub{state = {setup, From}} = Sub = orddict:fetch(Queue, Subs0),
   gen_server:reply(From, {ok, self()}),
-  Subscriptions = orddict:store(#sub{state = open}, Subscriptions0),
-  {noreply, S#s{subscriptions = Subscriptions}};
+  Subs = orddict:store(Queue, Sub#sub{state = open}, Subs0),
+  {noreply, S#s{subs = Subs}};
 
 handle_info(#'basic.cancel_ok'{consumer_tag = Queue},
-            #s{subscriptions = Subscriptions0} = S) ->
-  #sub{state = {close, From}} = orddict:fetch(Queue, Subscriptions0),
+            #s{subs = Subs0} = S) ->
+  #sub{state = {close, From}} = orddict:fetch(Queue, Subs0),
   gen_server:reply(From, ok),
-  Subscriptions = orddict:erase(Queue, Subscriptions0),
-  {noreply, S#s{subscriptions = Subscriptions}};
+  Subs = orddict:erase(Queue, Subs0),
+  {noreply, S#s{subs = Subs}};
 
-handle_info({#'basic.deliver'{delivery_tag = Tag}, Content},
+handle_info({#'basic.deliver'{delivery_tag = Queue}, Payload},
             #s{client_pid = ClientPid} = S) ->
-  ClientPid ! {msg, Tag, Content},
+  ClientPid ! {{msg, self()}, Tag, Payload},
   {noreply, S};
 
-handle_info({#'basic.raturn'{ reply_text = <<"unroutable">>
-                            , exchange   = Exchange}, Content}, S) ->
+handle_info({#'basic.return'{ reply_text = <<"unroutable">>
+                            , exchange   = Exchange}, Payload}, S) ->
   %% slightly drastic for now.
-  {stop, {unroutable, Exchange, Content}};
+  {stop, {unroutable, Exchange, Payload}};
 
 handle_info({ack, Tag}, #s{channel_pid = ChannelPid} = S) ->
-  Method = #'basic.ack'{delivery_tag = Tag},
-  amqp_channel:cast(ChannelPid, Method),
+  Ack = #'basic.ack'{delivery_tag = Tag},
+  amqp_channel:cast(ChannelPid, Ack),
   {noreply, S};
 
 handle_info({'DOWN', ChannelRef, process, ChannelPid, Rsn},
@@ -164,21 +175,22 @@ handle_info({'DOWN', ChannelRef, process, ChannelPid, Rsn},
 handle_info({'DOWN', ClientRef, process, ClientPid, Rsn},
             #s{ client_pid     = ClientPid
               , client_monitor = ClientRef} = S) ->
-  simple_amqp_server:cleanup(ClientPid),
+  ok = simple_amqp_server:cleanup(ClientPid),
   {noreply, S};
 
-handle_info(_Info, S) ->
+handle_info(Info, S) ->
+  io:format("WEIRD INFO: ~p~n", [Info]),
   {noreply, S}.
 
 terminate(_Reason, #s{ channel_pid     = ChannelPid
-                     , channel_monitor = ChannelRef
+                     , channel_monitor = ChannelMonitor
                      , client_pid      = ClientPid
-                     , client_monitor  = ClientRef}) ->
-  erlang:demonitor(ChannelRef, [flush]),
-  erlang:demonitor(ClientRef,  [flush]),
-  amqp_channel:call(Channel, #'basic.cancel'{consumer_tag = Tag}),
-  amqp_channel:close(Channel),
-  ok.
+                     , client_monitor  = ClientMonitor}) ->
+  erlang:demonitor(ChannelMonitor, [flush]),
+  erlang:demonitor(ClientMonitor,  [flush]),
+  ok = amqp_channel:close(Channel).
+
+%%%_ * Internals -------------------------------------------------------
 
 %%%_* Emacs ============================================================
 %%% Local Variables:
