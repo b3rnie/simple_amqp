@@ -11,7 +11,7 @@
 -export([ start/1
         , start_link/1
         , stop/0
-        , stop_async/0
+
         , subscribe/2
         , unsubscribe/2
         , publish/4
@@ -53,9 +53,6 @@ start_link(Args) ->
 stop() ->
   gen_server:call(?MODULE, stop).
 
-stop_async() ->
-  gen_server:cast(?MODULE, stop).
-
 subscribe(Pid, Queue) ->
   gen_server:call(?MODULE, {subscribe, Pid, Queue}).
 
@@ -66,10 +63,7 @@ publish(Pid, Exchange, RoutingKey, Payload) ->
   gen_server:call(?MODULE, {publish, Pid, Exchange, RoutingKey, Payload}).
 
 cleanup(Pid) ->
-  gen_server:call(?MODULE, {cleanup, Pid}).
-
-cleanup_async(Pid) ->
-  gen_server:cast(?MODULE, {cleanup_async, Pid}).
+  gen_server:cast(?MODULE, {cleanup, Pid}).
 
 %%%_ * gen_server callbacks --------------------------------------------
 init(Args) ->
@@ -99,31 +93,14 @@ handle_call({publish, Pid, Exchange, RoutingKey, Msg}, From, S0) ->
   simple_amqp_channel:publish(Pid, From, Exchange, RoutingKey, Msg),
   {noreply, S}.
 
-handle_call({cleanup, Pid}, From, S) ->
-  case delete(Pid, S0) of
-    {ok, S} -> {reply, ok, S};
-    {error, Rsn} -> {reply, {error, Rsn}, S0}
-  end;
-
-  S = maybe_delete(Pid, S0),
-  
-  case orddict:find(Pid, S#s.channels) of
-    {ok, #channel{ pid     = CPid,
-                 , monitor = CMon}} ->
-      erlang:demonitor(CMon, [flush]),
-      
-
-simple_amqp_channel:stop_async(CPid, From),
-                  Channels = orddict:erase(Pid, 
-                  Pids = orddict:erase(Pid, S#s.pids),
-                  {noreply, S#s{pids = Pids}};
-    error      -> {reply, ok, S}
-  end;
-
 handle_call(stop, _From, S) ->
   {stop, normal, S}.
 
-handle_cast({cleanup_async, Pid}, S0}) ->
+handle_cast({cleanup, Pid}, S0}) ->
+  case delete(Pid, S0) of
+    {ok, S}      -> {noreply, S};
+    {error, Rsn} -> {noreply, S0}
+  end;
 
 handle_cast(stop, #s{} = S) ->
   {stop, normal, S}.
@@ -168,6 +145,16 @@ maybe_new(Pid, S0) ->
                                               , monitor = Monitor},
                                  S0#s.channels),
       {CPid, S0#s{channels = Channels}}
+  end.
+
+maybe_delete(Pid, S0) ->
+  case orddict:find(Pid, S#s.channels) of
+    {ok, #channel{ pid     = CPid,
+                 , monitor = CMon}} ->
+      erlang:demonitor(CMon, [flush]),
+      simple_amqp_channel:stop(CPid),
+      {ok, S#s{pids = orddict:erase(Pid, S#s.channels)}};
+    error -> {error, no_such_key}
   end.
 
 params(Args) ->

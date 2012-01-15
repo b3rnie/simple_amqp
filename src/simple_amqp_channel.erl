@@ -10,7 +10,7 @@
 %%%_* Exports ==========================================================
 -export([ start/1
         , start_link/1
-        , stop/0
+        , stop/1
         , subscribe/3
         , unsubscribe/3
         , publish/5
@@ -31,16 +31,17 @@
 
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
--record(s, { pid
-           , monitor
-           , channel
+-record(s, { client_pid
+           , client_monitor
+           , channel_monitor
+           , channel_pid
+           , subscriptions %% {queue, consumer_tag}
            }).
 
 %%%_ * API -------------------------------------------------------------
 start(Args)      -> gen_server:start(?MODULE, Args, []).
 start_link(Args) -> gen_server:start_link(?MODULE, Args, []).
-stop(Pid)        -> gen_server:call(Pid, stop).
-stop_async(Pid)  -> gen_server:cast(Pid, stop).
+stop(Pid)        -> gen_server:cast(Pid, stop).
 
 subscribe(Pid, From, Queue) ->
   gen_server:cast(Pid, {subscribe, From, Queue}).
@@ -55,44 +56,64 @@ publish(Pid, From, Exchange, RoutingKey, Msg) ->
 init(Args) ->
   Connection = orddict:fetch(connection, Args),
   case amqp_connection:open_channel(Connection) of
-    {ok, Channel} ->
-      Pid = orddict:fetch(pid, Args),
-      {ok, #s{ pid        = Pid
-             , monitor    = erlang:monitor(process, Pid)
-             , connection = orddict:fetch(connection, Args)
-             , channel    = Channel
+    {ok, ChannelPid} ->
+      ClientPid = orddict:fetch(client_pid, Args),
+      {ok, #s{ client_pid      = ClientPid
+             , client_monitor  = erlang:monitor(process, ClientPid)
+             , channel_pid     = ChannelPid
+             , channel_monitor = erlang:monitor(process, ChannelPid)
+             , subscriptions   = []
              }}
   end.
 
-handle_call(stop, _From, S) ->
-  {stop, normal, S}.
-
-handle_cast(stop, #s{} = S) ->
+handle_cast(stop, S) ->
   {stop, normal, S};
 
-handle_cast({subscribe, From, Queue}, #s{} = S) ->
-  amqp_channel:call(Channel, #'basic.qos'{prefetch_count = 1}),
-  #'basic.consume_ok'{consumer_tag = Tag} =
-    amqp_channel:subscribe(Channel,
-                           #'basic.consume'{ queue = Queue
-                                           , consumer_tag = <<"foo">>
-                                         , 
-                         
-  gen_server:reply(From, ok),
-  {noreply, S};
+handle_cast({subscribe, From, Queue},
+            #s{subscriptions = Subscriptions} = S) ->
+  case lists:keymember(Queue, 1, Subscriptions) of
+    true ->
+      gen_server:reply(From, {error, already_subscribed}),
+      {noreply, S};
+    false ->
+      amqp_channel:call(Channel, #'basic.qos'{prefetch_count = 1}),
+      #'basic.consume_ok'{consumer_tag = Tag} =
+        amqp_channel:call(Channel,
+                          #'basic.consume'{ queue = Queue
+                                          , consumer_tag = <<"foo">>
+                                          }),
+      gen_server:reply(From, {ok, self()}),
+      {noreply, S#s{subscriptions = [{Queue,Tag} | Subscriptions]}}
+  end;
 
-handle_cast({unsubscribe, From, Queue}, #s{} = S) ->
-  gen_server:reply(From, ok),
-  {noreply, S};
+handle_cast({unsubscribe, From, Queue},
+            #s{ channel_pid   = ChannelPid
+              , subscriptions = Subscriptions0} = S) ->
+  case lists:keytake(Queue, 1, Subscriptions0) of
+    {value, {Queue, ConsumerTag}, Subscriptions} ->
+      amqp_channel:call(ChannelPid,
+                        #'basic.cancel'{consumer_tag = ConsumerTag}),
+      gen_server:reply(From, ok),
+      {noreply, S#s{subscriptions = Subscriptions}};
+    false ->
+      gen_server:reply(From, {error, not_subscribed}),
+      {noreply, S}
+  end;
 
 handle_cast({publish, From, Exchange, RoutingKey, PayLoad},
             #s{channel = Channel} = S) ->
-  amqp_channel:cast(Channel,
-                    #'basic.publish'{ exchange    = Exchange
-                                    , routing_key = RoutingKey
-                                    },
-                    #amqp_msg{payload = Payload}
-                    ),
+  Method =
+    #'basic.publish'{ exchange    = Exchange
+                    , routing_key = RoutingKey
+                    , mandatory   = true
+                    , immediate   = true
+                    },
+  Props = #'P_basic'{delivery_mode = 2}, %% 1 not persistent
+                                         %% 2 persistent
+  Msg = #amqp_msg{ payload = Payload
+                 , props   = Props
+                 },
+  amqp_channel:call(Channel, Method, Msg),
   gen_server:reply(From, ok),
   {noreply, S};
 
@@ -105,18 +126,37 @@ handle_info(#'basic.cancel_ok'{}, S) ->
 handle_info({#'basic.deliver'{}, Content}, S) ->
   {noreply, S};
 
-handle_info({'DOWN', Ref, process, Pid, Rsn}, #s{ pid = Pid
-                                                , ref = Ref} = S) ->
-  erlang:demonitor(Ref, [flush]),
-  simple_amqp_server:cleanup_async(Pid),
+handle_info(#'basic.raturn'{ reply_text = <<"unroutable">>
+                           , exchange = Exchange}, S) ->
+  %% Do something with the returned message
+  {noreply, S}
+
+handle_info({ack, Tag}, #s{channel_pid = ChannelPid} = S) ->
+  amqp_channel:cast(ChannelPid, #'basic.ack'{delivery_tag = Tag}),
   {noreply, S};
 
+handle_info({'DOWN', ChannelRef, process, ChannelPid, Rsn},
+            #s{ channel_pid     = ChannelPid
+              , channel_monitor = ChannelRef} = S) ->
+  simple_amqp_server:cleanup(S#s.client_pid),
+  {noreply, S};
+
+handle_info({'DOWN', ClientRef, process, ClientPid, Rsn},
+            #s{ client_pid     = ClientPid
+              , client_monitor = ClientRef} = S) ->
+  simple_amqp_server:cleanup(ClientPid),
+  {noreply, S};
 
 
 handle_info(_Info, S) ->
   {noreply, S}.
 
-terminate(_Reason, #s{channel = Channel}) ->
+terminate(_Reason, #s{ channel_pid     = ChannelPid
+                     , channel_monitor = ChannelRef
+                     , client_pid      = ClientPid
+                     , client_monitor  = ClientRef}) ->
+  erlang:demonitor(ChannelRef, [flush]),
+  erlang:demonitor(ClientRef,  [flush]),
   amqp_channel:call(Channel, #'basic.cancel'{consumer_tag = Tag}),
   amqp_channel:close(Channel),
   ok.
