@@ -17,8 +17,9 @@ start_link(Args) ->
 
 init(Args) ->
   RestartStrategy = {one_for_one, 1, 10},
-  Kids = {simple_amqp_server, {simple_amqp_server, start_link, []},
-          permanent, 5000, worker, [simple_amqp_server]},
+  Kids = [ {simple_amqp_server, {simple_amqp_server, start_link, [Args]},
+            permanent, 5000, worker, [simple_amqp_server]}
+         ],
   {ok, {RestartStrategy, Kids}}.
 
 %%%_* Emacs ============================================================

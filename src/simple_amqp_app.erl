@@ -12,7 +12,10 @@
 -export([start/2, stop/1]).
 
 %%%_* Code =============================================================
-start(_Type, Args) -> simple_amqp_sup:start_link(Args).
+start(_Type, _Args) ->
+  {ok, Brokers} = application:get_env(simple_amqp, brokers),
+  simple_amqp_sup:start_link([{brokers, Brokers}]).
+
 stop(_State)       -> ok.
 
 %%%_* Emacs ============================================================
