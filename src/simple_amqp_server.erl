@@ -88,10 +88,10 @@ cleanup(Pid) ->
   call({cleanup, Pid}).
 
 call(Args) -> gen_server:call(?MODULE, Args).
-cast(Args) -> gen_server:cast(?MODULE, Args).
+
 %%%_ * gen_server callbacks --------------------------------------------
 init(Args) ->
-  case amqp_connection:start(params(Args)) of
+  case connect(Args) of
     {ok, ConnectionPid} ->
       Monitor = erlang:monitor(process, ConnectionPid),
       {ok, #s{ channels           = orddict:new()
@@ -202,14 +202,37 @@ maybe_delete(Pid, #s{channels = Channels} = S) ->
     error -> S
   end.
 
-params(Args) ->
-  F = fun(K) -> orddict:fetch(K, Args) end,
+connect(Args) ->
+  do_connect(orddict:fetch(brokers, Args)).
+
+do_connect([]) -> {error, no_working_brokers};
+do_connect([{Type, Conf}|T]) ->
+  Params = params(Type, Conf),
+  case amqp_connection:start(Params) of
+    {ok, ConnectionPid} -> {ok, ConnectionPid};
+    {error, Rsn}        ->
+      error_logger:info_msg("Connect failed (~p,~p): ~p ~n",
+                            [?MODULE, Params, Rsn]),
+      do_connect(T)
+  end.
+
+params(direct, Args) ->
+  F = fun(K) -> proplists:get_value(K, Args) end,
   #amqp_params_direct{ username          = F(username)
                      , virtual_host      = F(virtual_host)
                      , node              = F(node)
-                     , adapter_info      = F(adapter_info)
-                     , client_properties = F(client_properties)
-                     }.
+                     };
+
+params(network, Args) ->
+  F = fun(K) -> proplists:get_value(K, Args) end,
+  #amqp_params_network{ username     = F(username)
+                      , password     = F(password)
+                      , virtual_host = F(virtual_host)
+                      , host         = F(host)
+                      , port         = F(port)
+                      }.
+
+
 %%%_* Emacs ============================================================
 %%% Local Variables:
 %%% allout-layout: t

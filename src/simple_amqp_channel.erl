@@ -14,6 +14,12 @@
         , subscribe/3
         , unsubscribe/3
         , publish/5
+        , declare_exchange/3
+        , delete_exchange/3
+        , declare_queue/3
+        , delete_queue/3
+        , bind/5
+        , unbind/5
         ]).
 
 -export([ init/1
@@ -44,16 +50,38 @@
 %%%_ * API -------------------------------------------------------------
 start(Args)      -> gen_server:start(?MODULE, Args, []).
 start_link(Args) -> gen_server:start_link(?MODULE, Args, []).
-stop(Pid)        -> gen_server:cast(Pid, stop).
+
+stop(Pid)        ->
+  cast(Pid, stop).
 
 subscribe(Pid, From, Queue) ->
-  gen_server:cast(Pid, {subscribe, From, Queue}).
+  cast(Pid, {subscribe, From, Queue}).
 
 unsubscribe(Pid, From, Queue) ->
-  gen_server:cast(Pid, {unsubscribe, From, Queue}).
+  cast(Pid, {unsubscribe, From, Queue}).
 
-publish(Pid, From, Exchange, RoutingKey, Msg) ->
-  gen_server:cast(Pid, {publish, From, Exchange, RoutingKey, Msg}).
+publish(Pid, From, Exchange, RoutingKey, Payload) ->
+  cast(Pid, {publish, From, Exchange, RoutingKey, Payload}).
+
+declare_exchange(Pid, From, Exchange) ->
+  cast(Pid, {declare_exchange, From, Exchange}).
+
+delete_exchange(Pid, From, Exchange) ->
+  cast(Pid, {delete_exchange, From, Exchange}).
+
+declare_queue(Pid, From, Queue) ->
+  cast(Pid, {declare_queue, From, Queue}).
+
+delete_queue(Pid, From, Queue) ->
+  cast(Pid, {delete_queue, From, Queue}).
+
+bind(Pid, From, Queue, Exchange, RoutingKey) ->
+  cast(Pid, {bind, From, Queue, Exchange, RoutingKey}).
+
+unbind(Pid, From, Queue, Exchange, RoutingKey) ->
+  cast(Pid, {unbind, From, Queue, Exchange, RoutingKey}).
+
+cast(Pid, Args) -> gen_server:cast(Pid, Args).
 
 %%%_ * gen_server callbacks --------------------------------------------
 init(Args) ->
@@ -138,6 +166,52 @@ handle_cast({publish, From, Exchange, RoutingKey, Payload},
                  },
   amqp_channel:call(ChannelPid, Publish, Msg),
   gen_server:reply(From, ok),
+  {noreply, S};
+
+handle_cast({declare_exchange, From, Exchange},
+            #s{channel_pid = ChannelPid} = S) ->
+  Declare = #'exchange.declare'{exchange = Exchange},
+  #'exchange.declare_ok'{} = amqp_channel:call(ChannelPid, Declare),
+  gen_server:reply(From, ok),
+  {noreply, S};
+
+handle_cast({delete_exchange, From, Exchange},
+            #s{channel_pid = ChannelPid} = S) ->
+  Delete = #'exchange.delete'{exchange = Exchange},
+  #'exchange.delete_ok'{} = amqp_channel:call(ChannelPid, Delete),
+  gen_server:reply(From, ok),
+  {noreply, S};
+
+handle_cast({declare_queue, From, Queue},
+            #s{channel_pid = ChannelPid} = S) ->
+  Declare = #'queue.declare'{queue = Queue},
+  #'queue.declare_ok'{} = amqp_channel:call(ChannelPid, Declare),
+  gen_server:reply(From, ok),
+  {noreply, S};
+
+handle_cast({delete_queue, From, Queue},
+            #s{channel_pid = ChannelPid} = S) ->
+  Delete = #'queue.delete'{queue = Queue},
+  #'queue.delete_ok'{} = amqp_channel:call(ChannelPid, Delete),
+  gen_server:reply(From, ok),
+  {noreply, S};
+
+handle_cast({bind, From, Queue, Exchange, RoutingKey},
+            #s{channel_pid = ChannelPid} = S) ->
+  Binding = #'queue.bind'{ queue       = Queue
+                         , exchange    = Exchange
+                         , routing_key = RoutingKey},
+  #'queue.bind_ok'{} = amqp_channel:call(ChannelPid, Binding),
+  gen_server:reply(From, ok),
+  {noreply, S};
+
+handle_cast({unbind, From, Queue, Exchange, RoutingKey},
+            #s{channel_pid = ChannelPid} = S) ->
+  Binding = #'queue.unbind'{ queue       = Queue
+                           , exchange    = Exchange
+                           , routing_key = RoutingKey},
+  #'queue.unbind_ok'{} = amqp_channel:call(ChannelPid, Binding),
+  gen_server:reply(From, ok),
   {noreply, S}.
 
 handle_info(#'basic.consume_ok'{consumer_tag = Queue},
@@ -160,7 +234,7 @@ handle_info({#'basic.deliver'{delivery_tag = Queue}, Payload},
   {noreply, S};
 
 handle_info({#'basic.return'{ reply_text = <<"unroutable">>
-                            , exchange   = Exchange}, Payload}, S) ->
+                            , exchange   = Exchange}, Payload}, _S) ->
   %% slightly drastic for now.
   {stop, {unroutable, Exchange, Payload}};
 
@@ -176,7 +250,7 @@ handle_info({'DOWN', ChannelRef, process, ChannelPid, Rsn},
   %%{noreply, S};
   {stop, Rsn, S};
 
-handle_info({'DOWN', ClientRef, process, ClientPid, Rsn},
+handle_info({'DOWN', ClientRef, process, ClientPid, _Rsn},
             #s{ client_pid     = ClientPid
               , client_monitor = ClientRef} = S) ->
   ok = simple_amqp_server:cleanup(ClientPid),
@@ -188,7 +262,6 @@ handle_info(Info, S) ->
 
 terminate(_Reason, #s{ channel_pid     = ChannelPid
                      , channel_monitor = ChannelMonitor
-                     , client_pid      = ClientPid
                      , client_monitor  = ClientMonitor}) ->
   erlang:demonitor(ChannelMonitor, [flush]),
   erlang:demonitor(ClientMonitor,  [flush]),

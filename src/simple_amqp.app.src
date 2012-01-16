@@ -5,5 +5,26 @@
  , {registered, []}
  , {mod, {simple_amqp_app, []}}
  , {applications, [kernel, stdlib]}
- , {env, []}
+ , {env, [ {brokers, [ { network
+                       , [ {username,     <<"test">>}
+                         , {password,     <<"test">>}
+                         , {virtual_host, <<"/">>}
+                         , {host,         <<"localhost">>}
+                         , {port,         5672}
+                         ]}
+                     , { network
+                       , [ {username,     <<"foo">>}
+                         , {password,     <<"foo">>}
+                         , {virtual_host, <<"/">>}
+                         , {host,         <<"localhost">>}
+                         , {port,         5672}
+                         ]}
+                     , { direct
+                       , [ { username,      <<"foo">>}
+                         , { virtual_host,  <<"/">>}
+                         , { node,          'foo@bar'}
+                         ]}
+                     ]
+           }
+         ]}
 ]}.
