@@ -31,14 +31,14 @@
 
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
--record(s, { client_pid      :: pid()
-           , client_monitor  :: monitor()
-           , channel_pid     :: pid()
-           , channel_monitor :: monitor()
-           , subs            :: orddict()
+-record(s, { client_pid      %% pid()
+           , client_monitor  %% monitor()
+           , channel_pid     %% pid()
+           , channel_monitor %% monitor()
+           , subs            %% orddict()
            }).
 
--record(sub, { state %% setup, open, close
+-record(sub, { state %% {setup, From} open, {close, From}
              }).
 
 %%%_ * API -------------------------------------------------------------
@@ -71,11 +71,15 @@ init(Args) ->
       {stop, Rsn}
   end.
 
+handle_call(sync, _From, S) ->
+  {reply, ok, S}.
+
 handle_cast(stop, S) ->
   {stop, normal, S};
 
 handle_cast({subscribe, From, Queue},
-            #s{subs = Subs0} = S) ->
+            #s{ channel_pid = ChannelPid
+              , subs        = Subs0} = S) ->
   case orddict:find(Queue, Subs0) of
     {ok, #sub{state = open}} ->
       %% gen_server:reply(From, {error, already_subscribed}),
@@ -89,12 +93,12 @@ handle_cast({subscribe, From, Queue},
       {noreply, S};
     error ->
       Qos = #'basic.qos'{prefetch_count = 1},
-      amqp_channel:call(Channel, Qos),
+      amqp_channel:call(ChannelPid, Qos),
       Consume = #'basic.consume'{ queue        = Queue
                                 , consumer_tag = Queue
                                 },
       #'basic.consume_ok'{consumer_tag = Queue} =
-        amqp_channel:call(Channel, Consume),
+        amqp_channel:call(ChannelPid, Consume),
       Sub  = #sub{state = {setup, From}},
       Subs = orddict:store(Queue, Sub, Subs0),
       {noreply, S#s{subs = Subs}}
@@ -103,7 +107,7 @@ handle_cast({subscribe, From, Queue},
 handle_cast({unsubscribe, From, Queue},
             #s{ channel_pid   = ChannelPid
               , subs          = Subs0} = S) ->
-  case orddict:fetch(Queue, Subscriptions0) of
+  case orddict:fetch(Queue, Subs0) of
     #sub{state = {close, _From}} ->
       gen_server:reply(From, {error, close_in_progress}),
       {noreply, S};
@@ -120,7 +124,7 @@ handle_cast({unsubscribe, From, Queue},
       {noreply, S}
   end;
 
-handle_cast({publish, From, Exchange, RoutingKey, PayLoad},
+handle_cast({publish, From, Exchange, RoutingKey, Payload},
             #s{channel_pid = ChannelPid} = S) ->
   Publish = #'basic.publish'{ exchange    = Exchange
                             , routing_key = RoutingKey
@@ -132,9 +136,9 @@ handle_cast({publish, From, Exchange, RoutingKey, PayLoad},
   Msg = #amqp_msg{ payload = Payload
                  , props   = Props
                  },
-  amqp_channel:call(Channel, Publish, Msg),
+  amqp_channel:call(ChannelPid, Publish, Msg),
   gen_server:reply(From, ok),
-  {noreply, S};
+  {noreply, S}.
 
 handle_info(#'basic.consume_ok'{consumer_tag = Queue},
             #s{subs = Subs0} = S) ->
@@ -152,7 +156,7 @@ handle_info(#'basic.cancel_ok'{consumer_tag = Queue},
 
 handle_info({#'basic.deliver'{delivery_tag = Queue}, Payload},
             #s{client_pid = ClientPid} = S) ->
-  ClientPid ! {{msg, self()}, Tag, Payload},
+  ClientPid ! {{msg, self()}, Queue, Payload},
   {noreply, S};
 
 handle_info({#'basic.return'{ reply_text = <<"unroutable">>
@@ -188,7 +192,10 @@ terminate(_Reason, #s{ channel_pid     = ChannelPid
                      , client_monitor  = ClientMonitor}) ->
   erlang:demonitor(ChannelMonitor, [flush]),
   erlang:demonitor(ClientMonitor,  [flush]),
-  ok = amqp_channel:close(Channel).
+  ok = amqp_channel:close(ChannelPid).
+
+code_change(_OldVsn, S, _Extra) ->
+  {ok, S}.
 
 %%%_ * Internals -------------------------------------------------------
 

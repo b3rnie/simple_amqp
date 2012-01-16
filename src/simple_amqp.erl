@@ -20,20 +20,20 @@
 %% @doc Subscribe to a queue, returned pid is the channel 'handler'
 %%      and can be monitored/linked.
 subscribe(Pid, Queue) ->
-  simple_amqp_server:subscribe(Queue).
+  simple_amqp_server:subscribe(Pid, Queue).
 
 %% @spec unsubscribe(Pid::pid(), Queue::binary()) ->
 %%                   ok | {error, Rsn}
 %% @doc Unsubscribe from a queue
 unsubscribe(Pid, Queue) ->
-  simple_amqp_server:unsubscribe(Queue).
+  simple_amqp_server:unsubscribe(Pid, Queue).
 
 %% @spec unsubscribe(Pid::pid(), Exchange::binary(),
 %%                   RoutingKey::binary(), Payload::any()) ->
 %%                   ok | {error, Rsn}
 %% @doc Publish a message
 publish(Pid, Exchange, RoutingKey, Payload) ->
-  simple_amqp_server:publish(Exchange, RoutingKey, Payload).
+  simple_amqp_server:publish(Pid, Exchange, RoutingKey, Payload).
 
 %% @spec unsubscribe(Pid::pid()) -> ok | {error, Rsn}
 %% @doc Cleanup after pid (channel, gen_server, etc).

@@ -26,8 +26,6 @@
         , code_change/3
         ]).
 
--export([worker/2]).
-
 %%%_* Includes =========================================================
 -include_lib("amqp_client/include/amqp_client.hrl").
 
@@ -35,13 +33,13 @@
 
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
--record(s, { channels           :: orddict()
-           , connection_pid     :: pid()
-           , connection_monitor :: monitor()
+-record(s, { channels           %% orddict()
+           , connection_pid     %% pid()
+           , connection_monitor %% monitor()
            }).
 
--record(channel, { pid     :: pid()
-                 , monitor :: monitor()
+-record(channel, { pid     %% pid()
+                 , monitor %% monitor()
                  }).
 %%%_ * API -------------------------------------------------------------
 start(Args) ->
@@ -131,9 +129,9 @@ code_change(_OldVsn, S, _Extra) ->
   {ok, S}.
 
 %%%_ * Internals -------------------------------------------------------
-maybe_new(Pid, #s{ connection = ConnectionPid
-                 , channels = Channels0} = S0) ->
-  case orddict:find(Pid, Channels0) of
+maybe_new(ClientPid, #s{ connection_pid = ConnectionPid
+                       , channels       = Channels0} = S0) ->
+  case orddict:find(ClientPid, Channels0) of
     {ok, #channel{pid = CPid}} -> {CPid, S0};
     error                      ->
       Args = orddict:from_list([ {connection_pid, ConnectionPid}
@@ -143,13 +141,13 @@ maybe_new(Pid, #s{ connection = ConnectionPid
       CMon       = erlang:monitor(process, CPid),
       Channel    = #channel{ pid     = CPid
                            , monitor = CMon},
-      Channels   = orddict:store(Pid, Channel, Channels0),
+      Channels   = orddict:store(ClientPid, Channel, Channels0),
       {CPid, S0#s{channels = Channels}}
   end.
 
 maybe_delete(Pid, #s{channels = Channels} = S) ->
   case orddict:find(Pid, Channels) of
-    {ok, #channel{ pid     = ChannelPid,
+    {ok, #channel{ pid     = ChannelPid
                  , monitor = ChannelMonitor}} ->
       erlang:demonitor(ChannelMonitor, [flush]),
       simple_amqp_channel:stop(ChannelPid),
