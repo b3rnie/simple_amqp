@@ -15,6 +15,12 @@
         , subscribe/2
         , unsubscribe/2
         , publish/4
+        , declare_exchange/2
+        , delete_exchange/2
+        , declare_queue/2
+        , delete_queue/2
+        , bind/4
+        , unbind/4
         , cleanup/1
         ]).
 
@@ -49,20 +55,40 @@ start_link(Args) ->
   gen_server:start_link({local, ?MODULE}, ?MODULE, Args, []).
 
 stop() ->
-  gen_server:call(?MODULE, stop).
+  call(stop).
 
 subscribe(Pid, Queue) ->
-  gen_server:call(?MODULE, {subscribe, Pid, Queue}).
+  call({subscribe, Pid, Queue}).
 
 unsubscribe(Pid, Queue) ->
-  gen_server:call(?MODULE, {unsubscribe, Pid, Queue}).
+  call({unsubscribe, Pid, Queue}).
 
 publish(Pid, Exchange, RoutingKey, Payload) ->
-  gen_server:call(?MODULE, {publish, Pid, Exchange, RoutingKey, Payload}).
+  call({publish, Pid, Exchange, RoutingKey, Payload}).
+
+declare_exchange(Pid, Exchange) ->
+  call({declare_exchange, Pid, Exchange}).
+
+delete_exchange(Pid, Exchange) ->
+  call({delete_exchange, Pid, Exchange}).
+
+declare_queue(Pid, Queue) ->
+  call({declare_queue, Pid, Queue}).
+
+delete_queue(Pid, Queue) ->
+  call({delete_queue, Pid, Queue}).
+
+bind(Pid, Queue, Exchange, RoutingKey) ->
+  call({bind, Pid, Queue, Exchange, RoutingKey}).
+
+unbind(Pid, Queue, Exchange, RoutingKey) ->
+  call({unbind, Pid, Queue, Exchange, RoutingKey}).
 
 cleanup(Pid) ->
-  gen_server:cast(?MODULE, {cleanup, Pid}).
+  call({cleanup, Pid}).
 
+call(Args) -> gen_server:call(?MODULE, Args).
+cast(Args) -> gen_server:cast(?MODULE, Args).
 %%%_ * gen_server callbacks --------------------------------------------
 init(Args) ->
   case amqp_connection:start(params(Args)) of
@@ -93,10 +119,31 @@ handle_call({unsubscribe, Pid, Queue}, From,
 
 handle_call({publish, Pid, Exchange, RoutingKey, Payload}, From, S0) ->
   {CPid, S} = maybe_new(Pid, S0),
-  simple_amqp_channel:publish(Pid, From, Exchange, RoutingKey, Payload),
+  simple_amqp_channel:publish(CPid, From, Exchange, RoutingKey, Payload),
   {noreply, S};
 
-handle_call({cleanup, Pid}, From, S0) ->
+handle_call({Method, Pid, Exchange}, From, S0)
+  when Method == declare_exchange;
+       Method == delete_exchange ->
+  {CPid, S} = maybe_new(Pid, S0),
+  simple_amqp_channel:Method(CPid, From, Exchange),
+  {noreply, S};
+
+handle_call({Method, Pid, Queue}, From, S0)
+  when Method == declare_queue;
+       Method == delete_queue ->
+  {CPid, S} = maybe_new(Pid, S0),
+  simple_amqp_channel:Method(CPid, From, Queue),
+  {noreply, S};
+
+handle_call({Method, Pid, Queue, Exchange, RoutingKey}, From, S0)
+  when Method == bind;
+       Method == unbind ->
+  {CPid, S} = maybe_new(Pid, S0),
+  simple_amqp_channel:Method(CPid, From, Queue, Exchange, RoutingKey),
+  {noreply, S};
+
+handle_call({cleanup, Pid}, _From, S0) ->
   S = maybe_delete(Pid, S0),
   {reply, ok, S}.
 
@@ -109,7 +156,7 @@ handle_info({'DOWN', CMon, process, CPid, Rsn},
               } = S) ->
   {stop, Rsn, S};
 
-handle_info({'DOWN', Mon, process, Pid, Rsn}, S) ->
+handle_info({'DOWN', _Mon, process, _Pid, Rsn}, S) ->
   %% no reason to shut everything down here.
   %% but do this for now
   {stop, Rsn, S};
