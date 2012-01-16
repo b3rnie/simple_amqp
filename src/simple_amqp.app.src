@@ -6,23 +6,23 @@
  , {mod, {simple_amqp_app, []}}
  , {applications, [kernel, stdlib]}
  , {env, [ {brokers, [ { network
-                       , [ {username,     <<"test">>}
-                         , {password,     <<"test">>}
+                       , [ {username,     <<"guest">>}
+                         , {password,     <<"guest">>}
                          , {virtual_host, <<"/">>}
-                         , {host,         <<"localhost">>}
+                         , {host,         "localhost"}
                          , {port,         5672}
                          ]}
                      , { network
                        , [ {username,     <<"foo">>}
                          , {password,     <<"foo">>}
                          , {virtual_host, <<"/">>}
-                         , {host,         <<"localhost">>}
+                         , {host,         "localhost"}
                          , {port,         5672}
                          ]}
                      , { direct
-                       , [ { username,      <<"foo">>}
-                         , { virtual_host,  <<"/">>}
-                         , { node,          'foo@bar'}
+                       , [ { username,     <<"foo">>}
+                         , { virtual_host, <<"/">>}
+                         , { node,         'rabbit@isaba'}
                          ]}
                      ]
            }
