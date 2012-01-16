@@ -40,6 +40,7 @@
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
 -record(s, { channels           %% orddict()
+           , pid2clients        %% orddict()
            , connection_pid     %% pid()
            , connection_monitor %% monitor()
            }).
@@ -95,6 +96,7 @@ init(Args) ->
     {ok, ConnectionPid} ->
       Monitor = erlang:monitor(process, ConnectionPid),
       {ok, #s{ channels           = orddict:new()
+             , pid2clients        = orddict:new()
              , connection_pid     = ConnectionPid
              , connection_monitor = Monitor
              }};
@@ -156,10 +158,11 @@ handle_info({'DOWN', CMon, process, CPid, Rsn},
               } = S) ->
   {stop, Rsn, S};
 
-handle_info({'DOWN', _Mon, process, _Pid, Rsn}, S) ->
-  %% no reason to shut everything down here.
-  %% but do this for now
-  {stop, Rsn, S};
+handle_info({'DOWN', Mon, process, Pid, Rsn},
+            #s{pid2clients = Pid2Clients} = S0) ->
+  error_logger:info_msg("Channel died (~p): ~p~n", [?MODULE, Rsn]),
+  S = maybe_delete(orddict:fetch(Pid, Pid2Clients), S0),
+  {noreply, S};
 
 handle_info(Info, S) ->
   io:format("WERID INFO: ~p~n", [Info]),
@@ -177,28 +180,33 @@ code_change(_OldVsn, S, _Extra) ->
 
 %%%_ * Internals -------------------------------------------------------
 maybe_new(ClientPid, #s{ connection_pid = ConnectionPid
-                       , channels       = Channels0} = S0) ->
+                       , channels       = Channels0
+                       , pid2clients    = Pid2Clients0} = S0) ->
   case orddict:find(ClientPid, Channels0) of
     {ok, #channel{pid = CPid}} -> {CPid, S0};
     error                      ->
       Args = orddict:from_list([ {connection_pid, ConnectionPid}
                                , {client_pid,     ClientPid}
                                ]),
-      {ok, CPid} = simple_amqp_channel:spawn(Args),
-      CMon       = erlang:monitor(process, CPid),
-      Channel    = #channel{ pid     = CPid
-                           , monitor = CMon},
-      Channels   = orddict:store(ClientPid, Channel, Channels0),
-      {CPid, S0#s{channels = Channels}}
+      {ok, CPid}  = simple_amqp_channel:start(Args),
+      CMon        = erlang:monitor(process, CPid),
+      Channel     = #channel{ pid     = CPid
+                            , monitor = CMon},
+      Channels    = orddict:store(ClientPid, Channel, Channels0),
+      Pid2Clients = orddict:store(CPid, ClientPid, Pid2Clients0),
+      {CPid, S0#s{ channels    = Channels
+                 , pid2clients = Pid2Clients}}
   end.
 
-maybe_delete(Pid, #s{channels = Channels} = S) ->
-  case orddict:find(Pid, Channels) of
+maybe_delete(ClientPid, #s{ channels    = Channels
+                          , pid2clients = Pid2Clients} = S) ->
+  case orddict:find(ClientPid, Channels) of
     {ok, #channel{ pid     = ChannelPid
                  , monitor = ChannelMonitor}} ->
       erlang:demonitor(ChannelMonitor, [flush]),
       simple_amqp_channel:stop(ChannelPid),
-      S#s{channels = orddict:erase(Pid, Channels)};
+      S#s{ channels    = orddict:erase(ClientPid, Channels)
+         , pid2clients = orddict:erase(ChannelPid, Pid2Clients)};
     error -> S
   end.
 

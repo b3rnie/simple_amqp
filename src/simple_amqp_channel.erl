@@ -253,6 +253,7 @@ handle_info({'DOWN', ChannelRef, process, ChannelPid, Rsn},
 handle_info({'DOWN', ClientRef, process, ClientPid, _Rsn},
             #s{ client_pid     = ClientPid
               , client_monitor = ClientRef} = S) ->
+  error_logger:info_msg("Channel died: ~p~n", [_Rsn]),
   ok = simple_amqp_server:cleanup(ClientPid),
   {noreply, S};
 
