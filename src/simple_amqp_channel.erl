@@ -34,6 +34,7 @@
 -include_lib("amqp_client/include/amqp_client.hrl").
 
 %%%_* Macros ===========================================================
+-define(amqp_dbg(Fmt,Args), io:format(Fmt,Args)).
 
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
@@ -122,7 +123,7 @@ handle_cast({subscribe, From, Queue, Ops},
       {noreply, S};
     error ->
       Qos = #'basic.qos'{prefetch_count = 1},
-      amqp_channel:call(ChannelPid, Qos),
+      #'basic.qos_ok'{} = amqp_channel:call(ChannelPid, Qos),
       Consume = #'basic.consume'{
          queue        = Queue
        , consumer_tag = Queue
@@ -139,14 +140,14 @@ handle_cast({subscribe, From, Queue, Ops},
 handle_cast({unsubscribe, From, Queue, _Ops},
             #s{ channel_pid   = ChannelPid
               , subs          = Subs0} = S) ->
-  case orddict:fetch(Queue, Subs0) of
-    #sub{state = {close, _From}} ->
+  case orddict:find(Queue, Subs0) of
+    {ok, #sub{state = {close, _From}}} ->
       gen_server:reply(From, {error, close_in_progress}),
       {noreply, S};
-    #sub{state = {setup, _From}} ->
+    {ok, #sub{state = {setup, _From}}} ->
       gen_server:reply(From, {error, setup_in_progress}),
       {noreply, S};
-    #sub{state = open} = Sub0 ->
+    {ok, #sub{state = open} = Sub0} ->
       Cancel = #'basic.cancel'{consumer_tag = Queue},
       amqp_channel:call(ChannelPid, Cancel),
       Sub = Sub0#sub{state = {close, From}},
@@ -233,6 +234,7 @@ handle_cast({unbind, From, Queue, Exchange, RoutingKey},
 
 handle_info(#'basic.consume_ok'{consumer_tag = Queue},
             #s{subs = Subs0} = S) ->
+  ?amqp_dbg("basic.consume_ok (consumer_tag = ~p)~n", [Queue]),
   #sub{state = {setup, From}} = Sub = orddict:fetch(Queue, Subs0),
   gen_server:reply(From, {ok, self()}),
   Subs = orddict:store(Queue, Sub#sub{state = open}, Subs0),
@@ -240,21 +242,32 @@ handle_info(#'basic.consume_ok'{consumer_tag = Queue},
 
 handle_info(#'basic.cancel_ok'{consumer_tag = Queue},
             #s{subs = Subs0} = S) ->
+  ?amqp_dbg("basic.cancel_ok (consumer_tag = ~p)~n", [Queue]),
   #sub{state = {close, From}} = orddict:fetch(Queue, Subs0),
   gen_server:reply(From, ok),
   Subs = orddict:erase(Queue, Subs0),
   {noreply, S#s{subs = Subs}};
 
-handle_info({#'basic.deliver'{ consumer_tag = _ConsumerTag
+handle_info({#'basic.deliver'{ consumer_tag = ConsumerTag
                              , delivery_tag = DeliveryTag
-                             , exchange     = _Exchange
+                             , exchange     = Exchange
                              , routing_key  = RoutingKey}, Payload},
             #s{client_pid = ClientPid} = S) ->
+  ?amqp_dbg("basic.deliver~n"
+            "(consumer_tag = ~p)~n"
+            "(delivery_tag = ~p)~n"
+            "(exchange     = ~p)~n"
+            "(routing_key  = ~p)~n",
+            [ConsumerTag, DeliveryTag, Exchange, RoutingKey]),
   ClientPid ! {msg, self(), DeliveryTag, RoutingKey, Payload},
   {noreply, S};
 
-handle_info({#'basic.return'{ reply_text = <<"unroutable">>
+handle_info({#'basic.return'{ reply_text = <<"unroutable">> = Text
                             , exchange   = Exchange}, Payload}, _S) ->
+  ?amqp_dbg("basic.return~n"
+            "(reply_text = ~p)~n"
+            "(exchange   = ~p)~n",
+            [Text, Exchange]),
   %% slightly drastic for now.
   {stop, {unroutable, Exchange, Payload}};
 
