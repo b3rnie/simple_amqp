@@ -12,13 +12,13 @@
         , start_link/1
         , stop/0
 
-        , subscribe/2
-        , unsubscribe/2
-        , publish/4
-        , declare_exchange/2
-        , delete_exchange/2
-        , declare_queue/2
-        , delete_queue/2
+        , subscribe/3
+        , unsubscribe/3
+        , publish/5
+        , exchange_declare/3
+        , exchange_delete/3
+        , queue_declare/3
+        , queue_delete/3
         , bind/4
         , unbind/4
         , cleanup/1
@@ -58,26 +58,26 @@ start_link(Args) ->
 stop() ->
   call(stop).
 
-subscribe(Pid, Queue) ->
-  call({subscribe, Pid, Queue}).
+subscribe(Pid, Queue, Ops) ->
+  call({subscribe, Pid, Queue, Ops}).
 
-unsubscribe(Pid, Queue) ->
-  call({unsubscribe, Pid, Queue}).
+unsubscribe(Pid, Queue, Ops) ->
+  call({unsubscribe, Pid, Queue, Ops}).
 
-publish(Pid, Exchange, RoutingKey, Payload) ->
-  call({publish, Pid, Exchange, RoutingKey, Payload}).
+publish(Pid, Exchange, RoutingKey, Payload, Ops) ->
+  call({publish, Pid, Exchange, RoutingKey, Payload, Ops}).
 
-declare_exchange(Pid, Exchange) ->
-  call({declare_exchange, Pid, Exchange}).
+exchange_declare(Pid, Exchange, Ops) ->
+  call({exchange_declare, Pid, Exchange, Ops}).
 
-delete_exchange(Pid, Exchange) ->
-  call({delete_exchange, Pid, Exchange}).
+exchange_delete(Pid, Exchange, Ops) ->
+  call({exchange_delete, Pid, Exchange, Ops}).
 
-declare_queue(Pid, Queue) ->
-  call({declare_queue, Pid, Queue}).
+queue_declare(Pid, Queue, Ops) ->
+  call({queue_declare, Pid, Queue, Ops}).
 
-delete_queue(Pid, Queue) ->
-  call({delete_queue, Pid, Queue}).
+queue_delete(Pid, Queue, Ops) ->
+  call({queue_delete, Pid, Queue, Ops}).
 
 bind(Pid, Queue, Exchange, RoutingKey) ->
   call({bind, Pid, Queue, Exchange, RoutingKey}).
@@ -104,38 +104,38 @@ init(Args) ->
       {stop, Rsn}
   end.
 
-handle_call({subscribe, Pid, Queue}, From, #s{} = S0) ->
+handle_call({subscribe, Pid, Queue, Ops}, From, S0) ->
   {CPid, S} = maybe_new(Pid, S0),
-  simple_amqp_channel:subscribe(CPid, From, Queue),
+  simple_amqp_channel:subscribe(CPid, From, Queue, Ops),
   {noreply, S};
 
-handle_call({unsubscribe, Pid, Queue}, From,
+handle_call({unsubscribe, Pid, Queue, Ops}, From,
             #s{channels = Channels} = S) ->
   case orddict:find(Pid, Channels) of
     {ok, #channel{pid = CPid}} ->
-      simple_amqp_channel:unsubscribe(CPid, From, Queue),
+      simple_amqp_channel:unsubscribe(CPid, From, Queue, Ops),
       {noreply, S};
     error ->
       {reply, {error, no_subscription}, S}
   end;
 
-handle_call({publish, Pid, Exchange, RoutingKey, Payload}, From, S0) ->
+handle_call({publish, Pid, Exchange, RoutingKey, Payload, Ops}, From, S0) ->
   {CPid, S} = maybe_new(Pid, S0),
-  simple_amqp_channel:publish(CPid, From, Exchange, RoutingKey, Payload),
+  simple_amqp_channel:publish(CPid, From, Exchange, RoutingKey, Payload, Ops),
   {noreply, S};
 
-handle_call({Method, Pid, Exchange}, From, S0)
-  when Method == declare_exchange;
-       Method == delete_exchange ->
+handle_call({Method, Pid, Exchange, Ops}, From, S0)
+  when Method == exchange_declare;
+       Method == exchange_delete ->
   {CPid, S} = maybe_new(Pid, S0),
-  simple_amqp_channel:Method(CPid, From, Exchange),
+  simple_amqp_channel:Method(CPid, From, Exchange, Ops),
   {noreply, S};
 
-handle_call({Method, Pid, Queue}, From, S0)
-  when Method == declare_queue;
-       Method == delete_queue ->
+handle_call({Method, Pid, Queue, Ops}, From, S0)
+  when Method == queue_declare;
+       Method == queue_delete ->
   {CPid, S} = maybe_new(Pid, S0),
-  simple_amqp_channel:Method(CPid, From, Queue),
+  simple_amqp_channel:Method(CPid, From, Queue, Ops),
   {noreply, S};
 
 handle_call({Method, Pid, Queue, Exchange, RoutingKey}, From, S0)

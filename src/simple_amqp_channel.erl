@@ -11,13 +11,13 @@
 -export([ start/1
         , start_link/1
         , stop/1
-        , subscribe/3
-        , unsubscribe/3
-        , publish/5
-        , declare_exchange/3
-        , delete_exchange/3
-        , declare_queue/3
-        , delete_queue/3
+        , subscribe/4
+        , unsubscribe/4
+        , publish/6
+        , exchange_declare/4
+        , exchange_delete/4
+        , queue_declare/4
+        , queue_delete/4
         , bind/5
         , unbind/5
         ]).
@@ -54,26 +54,26 @@ start_link(Args) -> gen_server:start_link(?MODULE, Args, []).
 stop(Pid)        ->
   cast(Pid, stop).
 
-subscribe(Pid, From, Queue) ->
-  cast(Pid, {subscribe, From, Queue}).
+subscribe(Pid, From, Queue, Ops) ->
+  cast(Pid, {subscribe, From, Queue, Ops}).
 
-unsubscribe(Pid, From, Queue) ->
-  cast(Pid, {unsubscribe, From, Queue}).
+unsubscribe(Pid, From, Queue, Ops) ->
+  cast(Pid, {unsubscribe, From, Queue, Ops}).
 
-publish(Pid, From, Exchange, RoutingKey, Payload) ->
-  cast(Pid, {publish, From, Exchange, RoutingKey, Payload}).
+publish(Pid, From, Exchange, RoutingKey, Payload, Ops) ->
+  cast(Pid, {publish, From, Exchange, RoutingKey, Payload, Ops}).
 
-declare_exchange(Pid, From, Exchange) ->
-  cast(Pid, {declare_exchange, From, Exchange}).
+exchange_declare(Pid, From, Exchange, Ops) ->
+  cast(Pid, {exchange_declare, From, Exchange, Ops}).
 
-delete_exchange(Pid, From, Exchange) ->
-  cast(Pid, {delete_exchange, From, Exchange}).
+exchange_delete(Pid, From, Exchange, Ops) ->
+  cast(Pid, {exchange_delete, From, Exchange, Ops}).
 
-declare_queue(Pid, From, Queue) ->
-  cast(Pid, {declare_queue, From, Queue}).
+queue_declare(Pid, From, Queue, Ops) ->
+  cast(Pid, {queue_declare, From, Queue, Ops}).
 
-delete_queue(Pid, From, Queue) ->
-  cast(Pid, {delete_queue, From, Queue}).
+queue_delete(Pid, From, Queue, Ops) ->
+  cast(Pid, {queue_delete, From, Queue, Ops}).
 
 bind(Pid, From, Queue, Exchange, RoutingKey) ->
   cast(Pid, {bind, From, Queue, Exchange, RoutingKey}).
@@ -105,7 +105,7 @@ handle_call(sync, _From, S) ->
 handle_cast(stop, S) ->
   {stop, normal, S};
 
-handle_cast({subscribe, From, Queue},
+handle_cast({subscribe, From, Queue, Ops},
             #s{ channel_pid = ChannelPid
               , subs        = Subs0} = S) ->
   case orddict:find(Queue, Subs0) of
@@ -124,6 +124,8 @@ handle_cast({subscribe, From, Queue},
       amqp_channel:call(ChannelPid, Qos),
       Consume = #'basic.consume'{ queue        = Queue
                                 , consumer_tag = Queue
+                                , no_ack       = ops(no_ack, Ops, false)
+                                , exclusive    = ops(exclusive, Ops, false)
                                 },
       #'basic.consume_ok'{consumer_tag = Queue} =
         amqp_channel:call(ChannelPid, Consume),
@@ -132,7 +134,7 @@ handle_cast({subscribe, From, Queue},
       {noreply, S#s{subs = Subs}}
   end;
 
-handle_cast({unsubscribe, From, Queue},
+handle_cast({unsubscribe, From, Queue, Ops},
             #s{ channel_pid   = ChannelPid
               , subs          = Subs0} = S) ->
   case orddict:fetch(Queue, Subs0) of
@@ -152,12 +154,12 @@ handle_cast({unsubscribe, From, Queue},
       {noreply, S}
   end;
 
-handle_cast({publish, From, Exchange, RoutingKey, Payload},
+handle_cast({publish, From, Exchange, RoutingKey, Payload, Ops},
             #s{channel_pid = ChannelPid} = S) ->
   Publish = #'basic.publish'{ exchange    = Exchange
                             , routing_key = RoutingKey
-                            , mandatory   = true
-                            , immediate   = true
+                            , mandatory   = ops(mandatory, Ops, false) %%true
+                            , immediate   = ops(immediate, Ops, false) %%true
                             },
   Props = #'P_basic'{delivery_mode = 2}, %% 1 not persistent
                                          %% 2 persistent
@@ -168,28 +170,36 @@ handle_cast({publish, From, Exchange, RoutingKey, Payload},
   gen_server:reply(From, ok),
   {noreply, S};
 
-handle_cast({declare_exchange, From, Exchange},
+handle_cast({exchange_declare, From, Exchange, Ops},
             #s{channel_pid = ChannelPid} = S) ->
-  Declare = #'exchange.declare'{exchange = Exchange},
+  Declare = #'exchange.declare'{ exchange    = Exchange
+                               , type        = ops(type, Ops, <<"direct">>)
+                               , auto_delete = ops(auto_delete, Ops, false)
+                               },
   #'exchange.declare_ok'{} = amqp_channel:call(ChannelPid, Declare),
   gen_server:reply(From, ok),
   {noreply, S};
 
-handle_cast({delete_exchange, From, Exchange},
+handle_cast({exchange_delete, From, Exchange, Ops},
             #s{channel_pid = ChannelPid} = S) ->
   Delete = #'exchange.delete'{exchange = Exchange},
   #'exchange.delete_ok'{} = amqp_channel:call(ChannelPid, Delete),
   gen_server:reply(From, ok),
   {noreply, S};
 
-handle_cast({declare_queue, From, Queue},
+handle_cast({queue_declare, From, Queue0, Ops},
             #s{channel_pid = ChannelPid} = S) ->
-  Declare = #'queue.declare'{queue = Queue},
-  #'queue.declare_ok'{} = amqp_channel:call(ChannelPid, Declare),
-  gen_server:reply(From, ok),
+  Declare = #'queue.declare'{ queue       = Queue0
+                            , exclusive   = ops(exclusive, Ops, false)
+                            , durable     = ops(durable, Ops, false)
+                            , auto_delete = ops(auto_delete, Ops, false)
+                            },
+  #'queue.declare_ok'{queue = Queue} =
+    amqp_channel:call(ChannelPid, Declare),
+  gen_server:reply(From, {ok, Queue}),
   {noreply, S};
 
-handle_cast({delete_queue, From, Queue},
+handle_cast({queue_delete, From, Queue, _Ops},
             #s{channel_pid = ChannelPid} = S) ->
   Delete = #'queue.delete'{queue = Queue},
   #'queue.delete_ok'{} = amqp_channel:call(ChannelPid, Delete),
@@ -228,9 +238,12 @@ handle_info(#'basic.cancel_ok'{consumer_tag = Queue},
   Subs = orddict:erase(Queue, Subs0),
   {noreply, S#s{subs = Subs}};
 
-handle_info({#'basic.deliver'{delivery_tag = Queue}, Payload},
+handle_info({#'basic.deliver'{ consumer_tag = _ConsumerTag
+                             , delivery_tag = DeliveryTag
+                             , exchange     = _Exchange
+                             , routing_key  = RoutingKey}, Payload},
             #s{client_pid = ClientPid} = S) ->
-  ClientPid ! {{msg, self()}, Queue, Payload},
+  ClientPid ! {msg, self(), DeliveryTag, RoutingKey, Payload},
   {noreply, S};
 
 handle_info({#'basic.return'{ reply_text = <<"unroutable">>
@@ -272,6 +285,7 @@ code_change(_OldVsn, S, _Extra) ->
   {ok, S}.
 
 %%%_ * Internals -------------------------------------------------------
+ops(K,Ops,Def) -> proplists:get_value(K,Ops,Def).
 
 %%%_* Emacs ============================================================
 %%% Local Variables:
