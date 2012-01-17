@@ -180,16 +180,27 @@ handle_cast({exchange_declare, From, Exchange, Ops},
             #s{channel_pid = ChannelPid} = S) ->
   Declare = #'exchange.declare'{
      exchange    = Exchange
-   , type        = ops(type, Ops, <<"direct">>)
+   , ticket      = ops(ticket,      Ops, 0)
+   , type        = ops(type,        Ops, <<"direct">>)
+   , passive     = ops(passive,     Ops, false)
+   , durable     = ops(durable,     Ops, false)
    , auto_delete = ops(auto_delete, Ops, false)
+   , internal    = ops(internal,    Ops, false)
+   , nowait      = ops(nowait,      Ops, false)
+   , arguments   = ops(arguments,   Ops, [])
    },
   #'exchange.declare_ok'{} = amqp_channel:call(ChannelPid, Declare),
   gen_server:reply(From, ok),
   {noreply, S};
 
-handle_cast({exchange_delete, From, Exchange, _Ops},
+handle_cast({exchange_delete, From, Exchange, Ops},
             #s{channel_pid = ChannelPid} = S) ->
-  Delete = #'exchange.delete'{exchange = Exchange},
+  Delete = #'exchange.delete'{
+     exchange = Exchange
+   , ticket = ops(ticket, Ops, 0)
+   , if_unused = ops(if_unused, Ops, false)
+   , nowait = ops(nowait, Ops, false)
+   },
   #'exchange.delete_ok'{} = amqp_channel:call(ChannelPid, Delete),
   gen_server:reply(From, ok),
   {noreply, S};
@@ -198,19 +209,30 @@ handle_cast({queue_declare, From, Queue0, Ops},
             #s{channel_pid = ChannelPid} = S) ->
   Declare = #'queue.declare'{
      queue       = Queue0
-   , exclusive   = ops(exclusive, Ops, false)
-   , durable     = ops(durable, Ops, false)
+   , ticket      = ops(ticket,      Ops, 0)
+   , passive     = ops(passive,     Ops, false)
+   , exclusive   = ops(exclusive,   Ops, false)
+   , durable     = ops(durable,     Ops, false)
    , auto_delete = ops(auto_delete, Ops, false)
+   , nowait      = ops(nowait,      Ops, false)
+   , arguments   = ops(arguments,   Ops, [])
    },
   #'queue.declare_ok'{queue = Queue} =
     amqp_channel:call(ChannelPid, Declare),
   gen_server:reply(From, {ok, Queue}),
   {noreply, S};
 
-handle_cast({queue_delete, From, Queue, _Ops},
+handle_cast({queue_delete, From, Queue, Ops},
             #s{channel_pid = ChannelPid} = S) ->
-  Delete = #'queue.delete'{queue = Queue},
-  #'queue.delete_ok'{} = amqp_channel:call(ChannelPid, Delete),
+  Delete = #'queue.delete'{
+     queue = Queue
+   , ticket    = ops(ticket, Ops, 0)
+   , if_unused = ops(if_unused, Ops, false)
+   , if_empty  = ops(if_empty,  Ops, false)
+   , nowait    = ops(nowait,    Ops, false)
+   },
+  #'queue.delete_ok'{message_count = _MessageCount} =
+    amqp_channel:call(ChannelPid, Delete),
   gen_server:reply(From, ok),
   {noreply, S};
 
