@@ -119,9 +119,11 @@ handle_call({unsubscribe, Pid, Queue, Ops}, From,
       {reply, {error, no_subscription}, S}
   end;
 
-handle_call({publish, Pid, Exchange, RoutingKey, Payload, Ops}, From, S0) ->
+handle_call({publish, Pid, Exchange, RoutingKey, Payload, Ops}, From,
+            S0) ->
   {CPid, S} = maybe_new(Pid, S0),
-  simple_amqp_channel:publish(CPid, From, Exchange, RoutingKey, Payload, Ops),
+  simple_amqp_channel:publish(CPid,
+                              From, Exchange, RoutingKey, Payload, Ops),
   {noreply, S};
 
 handle_call({Method, Pid, Exchange, Ops}, From, S0)
@@ -149,7 +151,7 @@ handle_call({cleanup, Pid}, _From, S0) ->
   S = maybe_delete(Pid, S0),
   {reply, ok, S}.
 
-handle_cast(stop, #s{} = S) ->
+handle_cast(stop, S) ->
   {stop, normal, S}.
 
 handle_info({'DOWN', CMon, process, CPid, Rsn},
@@ -158,19 +160,18 @@ handle_info({'DOWN', CMon, process, CPid, Rsn},
               } = S) ->
   {stop, Rsn, S};
 
-handle_info({'DOWN', Mon, process, Pid, Rsn},
+handle_info({'DOWN', _Mon, process, Pid, Rsn},
             #s{pid2clients = Pid2Clients} = S0) ->
   error_logger:info_msg("Channel died (~p): ~p~n", [?MODULE, Rsn]),
   S = maybe_delete(orddict:fetch(Pid, Pid2Clients), S0),
   {noreply, S};
 
-handle_info(Info, S) ->
-  io:format("WERID INFO: ~p~n", [Info]),
+handle_info(_Info, S) ->
   {noreply, S}.
 
 terminate(_Rsn, #s{ connection_pid = ConnectionPid
                   , channels       = Channels}) ->
-  orddict:fold(fun({CPid, #channel{}}, _) ->
+  orddict:fold(fun(CPid, #channel{}, _) ->
                    simple_amqp_channel:stop(CPid)
                end, '_', Channels),
   ok = amqp_connection:close(ConnectionPid).

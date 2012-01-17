@@ -51,7 +51,7 @@
 start(Args)      -> gen_server:start(?MODULE, Args, []).
 start_link(Args) -> gen_server:start_link(?MODULE, Args, []).
 
-stop(Pid)        ->
+stop(Pid) ->
   cast(Pid, stop).
 
 subscribe(Pid, From, Queue, Ops) ->
@@ -81,7 +81,8 @@ bind(Pid, From, Queue, Exchange, RoutingKey) ->
 unbind(Pid, From, Queue, Exchange, RoutingKey) ->
   cast(Pid, {unbind, From, Queue, Exchange, RoutingKey}).
 
-cast(Pid, Args) -> gen_server:cast(Pid, Args).
+cast(Pid, Args) ->
+  gen_server:cast(Pid, Args).
 
 %%%_ * gen_server callbacks --------------------------------------------
 init(Args) ->
@@ -122,11 +123,12 @@ handle_cast({subscribe, From, Queue, Ops},
     error ->
       Qos = #'basic.qos'{prefetch_count = 1},
       amqp_channel:call(ChannelPid, Qos),
-      Consume = #'basic.consume'{ queue        = Queue
-                                , consumer_tag = Queue
-                                , no_ack       = ops(no_ack, Ops, false)
-                                , exclusive    = ops(exclusive, Ops, false)
-                                },
+      Consume = #'basic.consume'{
+         queue        = Queue
+       , consumer_tag = Queue
+       , no_ack       = ops(no_ack, Ops, false)
+       , exclusive    = ops(exclusive, Ops, false)
+       },
       #'basic.consume_ok'{consumer_tag = Queue} =
         amqp_channel:call(ChannelPid, Consume),
       Sub  = #sub{state = {setup, From}},
@@ -134,7 +136,7 @@ handle_cast({subscribe, From, Queue, Ops},
       {noreply, S#s{subs = Subs}}
   end;
 
-handle_cast({unsubscribe, From, Queue, Ops},
+handle_cast({unsubscribe, From, Queue, _Ops},
             #s{ channel_pid   = ChannelPid
               , subs          = Subs0} = S) ->
   case orddict:fetch(Queue, Subs0) of
@@ -144,10 +146,11 @@ handle_cast({unsubscribe, From, Queue, Ops},
     #sub{state = {setup, _From}} ->
       gen_server:reply(From, {error, setup_in_progress}),
       {noreply, S};
-    #sub{state = open} = Sub ->
+    #sub{state = open} = Sub0 ->
       Cancel = #'basic.cancel'{consumer_tag = Queue},
       amqp_channel:call(ChannelPid, Cancel),
-      Subs = orddict:store(Queue, Sub#sub{state = {close, From}}, Subs0),
+      Sub = Sub0#sub{state = {close, From}},
+      Subs = orddict:store(Queue, Sub, Subs0),
       {noreply, S#s{subs = Subs}};
     error ->
       gen_server:reply(From, {error, not_subscribed}),
@@ -156,11 +159,13 @@ handle_cast({unsubscribe, From, Queue, Ops},
 
 handle_cast({publish, From, Exchange, RoutingKey, Payload, Ops},
             #s{channel_pid = ChannelPid} = S) ->
-  Publish = #'basic.publish'{ exchange    = Exchange
-                            , routing_key = RoutingKey
-                            , mandatory   = ops(mandatory, Ops, false) %%true
-                            , immediate   = ops(immediate, Ops, false) %%true
-                            },
+  Publish = #'basic.publish'{
+     exchange    = Exchange
+   , routing_key = RoutingKey
+   , mandatory   = ops(mandatory, Ops, false) %%true
+   , immediate   = ops(immediate, Ops, false) %%true
+   },
+
   Props = #'P_basic'{delivery_mode = 2}, %% 1 not persistent
                                          %% 2 persistent
   Msg = #amqp_msg{ payload = Payload
@@ -172,15 +177,16 @@ handle_cast({publish, From, Exchange, RoutingKey, Payload, Ops},
 
 handle_cast({exchange_declare, From, Exchange, Ops},
             #s{channel_pid = ChannelPid} = S) ->
-  Declare = #'exchange.declare'{ exchange    = Exchange
-                               , type        = ops(type, Ops, <<"direct">>)
-                               , auto_delete = ops(auto_delete, Ops, false)
-                               },
+  Declare = #'exchange.declare'{
+     exchange    = Exchange
+   , type        = ops(type, Ops, <<"direct">>)
+   , auto_delete = ops(auto_delete, Ops, false)
+   },
   #'exchange.declare_ok'{} = amqp_channel:call(ChannelPid, Declare),
   gen_server:reply(From, ok),
   {noreply, S};
 
-handle_cast({exchange_delete, From, Exchange, Ops},
+handle_cast({exchange_delete, From, Exchange, _Ops},
             #s{channel_pid = ChannelPid} = S) ->
   Delete = #'exchange.delete'{exchange = Exchange},
   #'exchange.delete_ok'{} = amqp_channel:call(ChannelPid, Delete),
@@ -189,11 +195,12 @@ handle_cast({exchange_delete, From, Exchange, Ops},
 
 handle_cast({queue_declare, From, Queue0, Ops},
             #s{channel_pid = ChannelPid} = S) ->
-  Declare = #'queue.declare'{ queue       = Queue0
-                            , exclusive   = ops(exclusive, Ops, false)
-                            , durable     = ops(durable, Ops, false)
-                            , auto_delete = ops(auto_delete, Ops, false)
-                            },
+  Declare = #'queue.declare'{
+     queue       = Queue0
+   , exclusive   = ops(exclusive, Ops, false)
+   , durable     = ops(durable, Ops, false)
+   , auto_delete = ops(auto_delete, Ops, false)
+   },
   #'queue.declare_ok'{queue = Queue} =
     amqp_channel:call(ChannelPid, Declare),
   gen_server:reply(From, {ok, Queue}),
