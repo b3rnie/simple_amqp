@@ -13,6 +13,7 @@
         , unsubscribe/2
         , unsubscribe/3
         , publish/4
+        , publish/5
         , exchange_declare/2
         , exchange_declare/3
         , exchange_delete/2
@@ -51,7 +52,10 @@ unsubscribe(Pid, Queue, Ops) ->
 %%                   ok | {error, Rsn}
 %% @doc Publish a message
 publish(Pid, Exchange, RoutingKey, Payload) ->
-  simple_amqp_server:publish(Pid, Exchange, RoutingKey, Payload).
+  publish(Pid, Exchange, RoutingKey, Payload, []).
+
+publish(Pid, Exchange, RoutingKey, Payload, Ops) ->
+  simple_amqp_server:publish(Pid, Exchange, RoutingKey, Payload, Ops).
 
 %% @spec exchange_declare(Pid::pid(), Exchange) -> ok | {error, Rsn}
 %% @doc declare a new exchange

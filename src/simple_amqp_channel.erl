@@ -149,7 +149,7 @@ handle_cast({unsubscribe, From, Queue, _Ops},
       {noreply, S};
     {ok, #sub{state = open} = Sub0} ->
       Cancel = #'basic.cancel'{consumer_tag = Queue},
-      amqp_channel:call(ChannelPid, Cancel),
+      #'basic.cancel_ok'{} = amqp_channel:call(ChannelPid, Cancel),
       Sub = Sub0#sub{state = {close, From}},
       Subs = orddict:store(Queue, Sub, Subs0),
       {noreply, S#s{subs = Subs}};
@@ -172,7 +172,7 @@ handle_cast({publish, From, Exchange, RoutingKey, Payload, Ops},
   Msg = #amqp_msg{ payload = Payload
                  , props   = Props
                  },
-  amqp_channel:call(ChannelPid, Publish, Msg),
+  ok = amqp_channel:call(ChannelPid, Publish, Msg),
   gen_server:reply(From, ok),
   {noreply, S};
 
