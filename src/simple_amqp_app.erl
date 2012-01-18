@@ -18,7 +18,7 @@ start(Type, []) ->
 start(_Type, Args) ->
   simple_amqp_sup:start_link(Args).
 
-stop(_State)       -> ok.
+stop(_State) -> ok.
 
 %%%_* Emacs ============================================================
 %%% Local Variables:

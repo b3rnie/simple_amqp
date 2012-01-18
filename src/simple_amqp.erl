@@ -104,6 +104,63 @@ unbind(Pid, Queue, Exchange, RoutingKey) ->
 cleanup(Pid) ->
   simple_amqp_server:cleanup(Pid).
 
+%%%_* Tests ============================================================
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+basic_test() ->
+  ok = application:start(?MODULE),
+  Queue    = <<"test_queue">>,
+  Exchange = <<"test_exchange">>,
+  RK       = <<"test_routing_key">>,
+  Queue    = basic_setup(self(), Exchange, Queue, RK),
+  Daddy    = self(),
+  Consumer = proc_lib:spawn_link(fun() ->
+                                     basic_consumer(Daddy, Queue)
+                                 end),
+  Producer = proc_lib:spawn_link(fun() ->
+                                     basic_producer(Daddy, Exchange, RK)
+                                 end),
+  receive {ok, Consumer} -> ok end,
+  ok = basic_close(self(), Exchange, Queue, RK),
+  lists:foreach(fun(Pid) ->
+                    ok = simple_amqp:cleanup(Pid)
+                end, [Daddy, Consumer, Producer]),
+  application:stop(?MODULE),
+  ok.
+
+basic_producer(_Daddy, X, RK) ->
+  F = fun(Bin) -> simple_amqp:publish(self(), X, RK, Bin) end,
+  lists:foreach(F, basic_dataset()).
+
+basic_consumer(Daddy, Queue) ->
+  {ok, Pid} = simple_amqp:subscribe(self(), Queue),
+  basic_consumer_consume(Pid, basic_dataset()),
+  Daddy ! {ok, self()}.
+
+basic_consumer_consume(Pid, []) -> ok;
+basic_consumer_consume(Pid, Dataset) ->
+  receive
+    {msg, Pid, DeliveryTag, _RK, Payload} ->
+      Pid ! {ack, DeliveryTag},
+      basic_consumer_consume(Pid, Dataset -- [Payload])
+  end.
+
+basic_setup(Pid, X, Q0, RK) ->
+  ok      = simple_amqp:exchange_declare(Pid, X),
+  {ok, Q} = simple_amqp:queue_declare(Pid, Q0),
+  ok      = simple_amqp:bind(Pid, Q, X, RK),
+  Q.
+
+basic_close(Pid, X, Q, RK) ->
+  ok = simple_amqp:unbind(Pid, Q, X, RK).
+
+basic_dataset() ->
+  [term_to_binary(Term) || Term <- [1, 2, 3, 4]].
+
+-else.
+-endif.
+
 %%%_* Emacs ============================================================
 %%% Local Variables:
 %%% allout-layout: t
