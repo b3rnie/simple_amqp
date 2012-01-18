@@ -274,7 +274,8 @@ handle_info(#'basic.cancel_ok'{consumer_tag = Queue},
 handle_info({#'basic.deliver'{ consumer_tag = ConsumerTag
                              , delivery_tag = DeliveryTag
                              , exchange     = Exchange
-                             , routing_key  = RoutingKey}, Payload},
+                             , routing_key  = RoutingKey},
+             #amqp_msg{payload = Payload}},
             #s{client_pid = ClientPid} = S) ->
   ?amqp_dbg("basic.deliver~n"
             "(consumer_tag = ~p)~n"
