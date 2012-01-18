@@ -12,9 +12,11 @@
 -export([start/2, stop/1]).
 
 %%%_* Code =============================================================
-start(_Type, _Args) ->
+start(Type, []) ->
   {ok, Brokers} = application:get_env(simple_amqp, brokers),
-  simple_amqp_sup:start_link([{brokers, Brokers}]).
+  start(Type, [{brokers, Brokers}]);
+start(_Type, Args) ->
+  simple_amqp_sup:start_link(Args).
 
 stop(_State)       -> ok.
 
