@@ -34,7 +34,8 @@
 -include_lib("amqp_client/include/amqp_client.hrl").
 
 %%%_* Macros ===========================================================
--define(amqp_dbg(Fmt,Args), io:format(Fmt,Args)).
+-define(amqp_dbg(From, Args), _ = {From, Args}).
+%%-define(amqp_dbg(Fmt,Args), io:format(Fmt,Args)).
 
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
