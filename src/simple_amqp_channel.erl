@@ -173,7 +173,7 @@ handle_cast({publish, From, Exchange, RoutingKey, Payload, Ops},
   Msg = #amqp_msg{ payload = Payload
                  , props   = Props
                  },
-  ok = amqp_channel:call(ChannelPid, Publish, Msg),
+  ok = amqp_channel:cast(ChannelPid, Publish, Msg),
   gen_server:reply(From, ok),
   {noreply, S};
 
@@ -197,10 +197,10 @@ handle_cast({exchange_declare, From, Exchange, Ops},
 handle_cast({exchange_delete, From, Exchange, Ops},
             #s{channel_pid = ChannelPid} = S) ->
   Delete = #'exchange.delete'{
-     exchange = Exchange
-   , ticket = ops(ticket, Ops, 0)
+     exchange  = Exchange
+   , ticket    = ops(ticket, Ops, 0)
    , if_unused = ops(if_unused, Ops, false)
-   , nowait = ops(nowait, Ops, false)
+   , nowait    = ops(nowait, Ops, false)
    },
   #'exchange.delete_ok'{} = amqp_channel:call(ChannelPid, Delete),
   gen_server:reply(From, ok),
