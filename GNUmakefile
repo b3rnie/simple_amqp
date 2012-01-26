@@ -1,6 +1,7 @@
 .PHONY:	all check test clean
 
 all:
+	./rebar get-deps
 	./rebar compile
 
 docs:
