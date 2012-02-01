@@ -11,15 +11,7 @@
 -export([ start/1
         , start_link/1
         , stop/1
-        , subscribe/4
-        , unsubscribe/4
-        , publish/6
-        , exchange_declare/4
-        , exchange_delete/4
-        , queue_declare/4
-        , queue_delete/4
-        , bind/5
-        , unbind/5
+        , cmd/4
         ]).
 
 -export([ init/1
@@ -39,11 +31,11 @@
 
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
--record(s, { client_pid      %% pid()
-           , client_monitor  %% monitor()
-           , channel_pid     %% pid()
-           , channel_monitor %% monitor()
-           , subs            %% orddict()
+-record(s, { client_pid  %% pid()
+           , client_ref  %% monitor()
+           , channel_pid %% pid()
+           , channel_ref %% monitor()
+           , subs        %% orddict()
            }).
 
 -record(sub, { state %% {setup, From} open, {close, From}
@@ -53,50 +45,20 @@
 start(Args)      -> gen_server:start(?MODULE, Args, []).
 start_link(Args) -> gen_server:start_link(?MODULE, Args, []).
 
-stop(Pid) ->
-  cast(Pid, stop).
-
-subscribe(Pid, From, Queue, Ops) ->
-  cast(Pid, {subscribe, From, Queue, Ops}).
-
-unsubscribe(Pid, From, Queue, Ops) ->
-  cast(Pid, {unsubscribe, From, Queue, Ops}).
-
-publish(Pid, From, Exchange, RoutingKey, Payload, Ops) ->
-  cast(Pid, {publish, From, Exchange, RoutingKey, Payload, Ops}).
-
-exchange_declare(Pid, From, Exchange, Ops) ->
-  cast(Pid, {exchange_declare, From, Exchange, Ops}).
-
-exchange_delete(Pid, From, Exchange, Ops) ->
-  cast(Pid, {exchange_delete, From, Exchange, Ops}).
-
-queue_declare(Pid, From, Queue, Ops) ->
-  cast(Pid, {queue_declare, From, Queue, Ops}).
-
-queue_delete(Pid, From, Queue, Ops) ->
-  cast(Pid, {queue_delete, From, Queue, Ops}).
-
-bind(Pid, From, Queue, Exchange, RoutingKey) ->
-  cast(Pid, {bind, From, Queue, Exchange, RoutingKey}).
-
-unbind(Pid, From, Queue, Exchange, RoutingKey) ->
-  cast(Pid, {unbind, From, Queue, Exchange, RoutingKey}).
-
-cast(Pid, Args) ->
-  gen_server:cast(Pid, Args).
+stop(Pid)                 -> cast(Pid, stop).
+cmd(Pid, From, Cmd, Args) -> cast(Pid, {cmd, Cmd, Args, From}).
 
 %%%_ * gen_server callbacks --------------------------------------------
 init(Args) ->
-  ConnectionPid = orddict:fetch(connection_pid, Args),
+  ConnectionPid = proplists:get_value(connection_pid, Args),
   case amqp_connection:open_channel(ConnectionPid) of
     {ok, ChannelPid} ->
-      ClientPid = orddict:fetch(client_pid, Args),
-      {ok, #s{ client_pid      = ClientPid
-             , client_monitor  = erlang:monitor(process, ClientPid)
-             , channel_pid     = ChannelPid
-             , channel_monitor = erlang:monitor(process, ChannelPid)
-             , subs            = orddict:new()
+      ClientPid = proplists:get_value(client_pid, Args),
+      {ok, #s{ client_pid  = ClientPid
+             , client_ref  = erlang:monitor(process, ClientPid)
+             , channel_pid = ChannelPid
+             , channel_ref = erlang:monitor(process, ChannelPid)
+             , subs        = dict:new()
              }};
     {error, Rsn} ->
       {stop, Rsn}
@@ -108,10 +70,10 @@ handle_call(sync, _From, S) ->
 handle_cast(stop, S) ->
   {stop, normal, S};
 
-handle_cast({subscribe, From, Queue, Ops},
+handle_cast({cmd, subscribe, [Queue, Ops], From},
             #s{ channel_pid = ChannelPid
               , subs        = Subs0} = S) ->
-  case orddict:find(Queue, Subs0) of
+  case dict:find(Queue, Subs0) of
     {ok, #sub{state = open}} ->
       %% gen_server:reply(From, {error, already_subscribed}),
       gen_server:reply(From, {ok, self()}),
@@ -134,14 +96,14 @@ handle_cast({subscribe, From, Queue, Ops},
       #'basic.consume_ok'{consumer_tag = Queue} =
         amqp_channel:call(ChannelPid, Consume),
       Sub  = #sub{state = {setup, From}},
-      Subs = orddict:store(Queue, Sub, Subs0),
+      Subs = dict:store(Queue, Sub, Subs0),
       {noreply, S#s{subs = Subs}}
   end;
 
-handle_cast({unsubscribe, From, Queue, _Ops},
+handle_cast({cmd, unsubscribe, [Queue, _Ops], From},
             #s{ channel_pid   = ChannelPid
               , subs          = Subs0} = S) ->
-  case orddict:find(Queue, Subs0) of
+  case dict:find(Queue, Subs0) of
     {ok, #sub{state = {close, _From}}} ->
       gen_server:reply(From, {error, close_in_progress}),
       {noreply, S};
@@ -152,14 +114,14 @@ handle_cast({unsubscribe, From, Queue, _Ops},
       Cancel = #'basic.cancel'{consumer_tag = Queue},
       #'basic.cancel_ok'{} = amqp_channel:call(ChannelPid, Cancel),
       Sub = Sub0#sub{state = {close, From}},
-      Subs = orddict:store(Queue, Sub, Subs0),
+      Subs = dict:store(Queue, Sub, Subs0),
       {noreply, S#s{subs = Subs}};
     error ->
       gen_server:reply(From, {error, not_subscribed}),
       {noreply, S}
   end;
 
-handle_cast({publish, From, Exchange, RoutingKey, Payload, Ops},
+handle_cast({cmd, publish, [Exchange, RoutingKey, Payload, Ops], From},
             #s{channel_pid = ChannelPid} = S) ->
   Publish = #'basic.publish'{
      exchange    = Exchange
@@ -177,7 +139,7 @@ handle_cast({publish, From, Exchange, RoutingKey, Payload, Ops},
   gen_server:reply(From, ok),
   {noreply, S};
 
-handle_cast({exchange_declare, From, Exchange, Ops},
+handle_cast({cmd, exchange_declare, [Exchange, Ops], From},
             #s{channel_pid = ChannelPid} = S) ->
   Declare = #'exchange.declare'{
      exchange    = Exchange
@@ -194,7 +156,7 @@ handle_cast({exchange_declare, From, Exchange, Ops},
   gen_server:reply(From, ok),
   {noreply, S};
 
-handle_cast({exchange_delete, From, Exchange, Ops},
+handle_cast({cmd, exchange_delete, [Exchange, Ops], From},
             #s{channel_pid = ChannelPid} = S) ->
   Delete = #'exchange.delete'{
      exchange  = Exchange
@@ -206,7 +168,7 @@ handle_cast({exchange_delete, From, Exchange, Ops},
   gen_server:reply(From, ok),
   {noreply, S};
 
-handle_cast({queue_declare, From, Queue0, Ops},
+handle_cast({cmd, queue_declare, [Queue0, Ops], From},
             #s{channel_pid = ChannelPid} = S) ->
   Declare = #'queue.declare'{
      queue       = Queue0
@@ -223,7 +185,7 @@ handle_cast({queue_declare, From, Queue0, Ops},
   gen_server:reply(From, {ok, Queue}),
   {noreply, S};
 
-handle_cast({queue_delete, From, Queue, Ops},
+handle_cast({cmd, queue_delete, [Queue, Ops], From},
             #s{channel_pid = ChannelPid} = S) ->
   Delete = #'queue.delete'{
      queue = Queue
@@ -237,7 +199,7 @@ handle_cast({queue_delete, From, Queue, Ops},
   gen_server:reply(From, ok),
   {noreply, S};
 
-handle_cast({bind, From, Queue, Exchange, RoutingKey},
+handle_cast({cmd, bind, [Queue, Exchange, RoutingKey], From},
             #s{channel_pid = ChannelPid} = S) ->
   Binding = #'queue.bind'{ queue       = Queue
                          , exchange    = Exchange
@@ -246,7 +208,7 @@ handle_cast({bind, From, Queue, Exchange, RoutingKey},
   gen_server:reply(From, ok),
   {noreply, S};
 
-handle_cast({unbind, From, Queue, Exchange, RoutingKey},
+handle_cast({cmd, unbind, [Queue, Exchange, RoutingKey], From},
             #s{channel_pid = ChannelPid} = S) ->
   Binding = #'queue.unbind'{ queue       = Queue
                            , exchange    = Exchange
@@ -258,17 +220,17 @@ handle_cast({unbind, From, Queue, Exchange, RoutingKey},
 handle_info(#'basic.consume_ok'{consumer_tag = Queue},
             #s{subs = Subs0} = S) ->
   ?amqp_dbg("basic.consume_ok (consumer_tag = ~p)~n", [Queue]),
-  #sub{state = {setup, From}} = Sub = orddict:fetch(Queue, Subs0),
+  #sub{state = {setup, From}} = Sub = dict:fetch(Queue, Subs0),
   gen_server:reply(From, {ok, self()}),
-  Subs = orddict:store(Queue, Sub#sub{state = open}, Subs0),
+  Subs = dict:store(Queue, Sub#sub{state = open}, Subs0),
   {noreply, S#s{subs = Subs}};
 
 handle_info(#'basic.cancel_ok'{consumer_tag = Queue},
             #s{subs = Subs0} = S) ->
   ?amqp_dbg("basic.cancel_ok (consumer_tag = ~p)~n", [Queue]),
-  #sub{state = {close, From}} = orddict:fetch(Queue, Subs0),
+  #sub{state = {close, From}} = dict:fetch(Queue, Subs0),
   gen_server:reply(From, ok),
-  Subs = orddict:erase(Queue, Subs0),
+  Subs = dict:erase(Queue, Subs0),
   {noreply, S#s{subs = Subs}};
 
 handle_info({#'basic.deliver'{ consumer_tag = ConsumerTag
@@ -302,15 +264,17 @@ handle_info({ack, Tag}, #s{channel_pid = ChannelPid} = S) ->
 
 handle_info({'DOWN', ChannelRef, process, ChannelPid, Rsn},
             #s{ channel_pid     = ChannelPid
-              , channel_monitor = ChannelRef} = S) ->
+              , channel_ref = ChannelRef} = S) ->
+  error_logger:info_msg("Channel died: ~p~n", [Rsn]),
+
   %%simple_amqp_server:cleanup(S#s.client_pid),
   %%{noreply, S};
   {stop, Rsn, S};
 
-handle_info({'DOWN', ClientRef, process, ClientPid, _Rsn},
+handle_info({'DOWN', ClientRef, process, ClientPid, Rsn},
             #s{ client_pid     = ClientPid
-              , client_monitor = ClientRef} = S) ->
-  error_logger:info_msg("Channel died: ~p~n", [_Rsn]),
+              , client_ref = ClientRef} = S) ->
+  error_logger:info_msg("Client died: ~p~n", [Rsn]),
   ok = simple_amqp_server:cleanup(ClientPid),
   {noreply, S};
 
@@ -318,11 +282,11 @@ handle_info(Info, S) ->
   io:format("WEIRD INFO: ~p~n", [Info]),
   {noreply, S}.
 
-terminate(_Reason, #s{ channel_pid     = ChannelPid
-                     , channel_monitor = ChannelMonitor
-                     , client_monitor  = ClientMonitor}) ->
-  erlang:demonitor(ChannelMonitor, [flush]),
-  erlang:demonitor(ClientMonitor,  [flush]),
+terminate(_Reason, #s{ channel_pid = ChannelPid
+                     , channel_ref = ChannelRef
+                     , client_ref  = ClientRef}) ->
+  erlang:demonitor(ChannelRef, [flush]),
+  erlang:demonitor(ClientRef,  [flush]),
   ok = amqp_channel:close(ChannelPid).
 
 code_change(_OldVsn, S, _Extra) ->
@@ -330,6 +294,8 @@ code_change(_OldVsn, S, _Extra) ->
 
 %%%_ * Internals -------------------------------------------------------
 ops(K,Ops,Def) -> proplists:get_value(K,Ops,Def).
+
+cast(Pid, Args) -> gen_server:cast(Pid, Args).
 
 %%%_* Emacs ============================================================
 %%% Local Variables:

@@ -11,17 +11,8 @@
 -export([ start/1
         , start_link/1
         , stop/0
-
-        , subscribe/3
-        , unsubscribe/3
-        , publish/5
-        , exchange_declare/3
-        , exchange_delete/3
-        , queue_declare/3
-        , queue_delete/3
-        , bind/4
-        , unbind/4
         , cleanup/1
+        , cmd/3
         ]).
 
 -export([ init/1
@@ -39,14 +30,14 @@
 
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
--record(s, { channels           %% orddict()
-           , pid2clients        %% orddict()
-           , connection_pid     %% pid()
-           , connection_monitor %% monitor()
+-record(s, { clientpid_to_channel    %% dict
+           , channelpid_to_clientpid %% dict
+           , connection_pid          %% pid()
+           , connection_ref       %% monitor()
            }).
 
--record(channel, { pid     %% pid()
-                 , monitor %% monitor()
+-record(channel, { pid %% pid()
+                 , ref %% monitor()
                  }).
 %%%_ * API -------------------------------------------------------------
 start(Args) ->
@@ -55,164 +46,119 @@ start(Args) ->
 start_link(Args) ->
   gen_server:start_link({local, ?MODULE}, ?MODULE, Args, []).
 
-stop() ->
-  call(stop).
-
-subscribe(Pid, Queue, Ops) ->
-  call({subscribe, Pid, Queue, Ops}).
-
-unsubscribe(Pid, Queue, Ops) ->
-  call({unsubscribe, Pid, Queue, Ops}).
-
-publish(Pid, Exchange, RoutingKey, Payload, Ops) ->
-  call({publish, Pid, Exchange, RoutingKey, Payload, Ops}).
-
-exchange_declare(Pid, Exchange, Ops) ->
-  call({exchange_declare, Pid, Exchange, Ops}).
-
-exchange_delete(Pid, Exchange, Ops) ->
-  call({exchange_delete, Pid, Exchange, Ops}).
-
-queue_declare(Pid, Queue, Ops) ->
-  call({queue_declare, Pid, Queue, Ops}).
-
-queue_delete(Pid, Queue, Ops) ->
-  call({queue_delete, Pid, Queue, Ops}).
-
-bind(Pid, Queue, Exchange, RoutingKey) ->
-  call({bind, Pid, Queue, Exchange, RoutingKey}).
-
-unbind(Pid, Queue, Exchange, RoutingKey) ->
-  call({unbind, Pid, Queue, Exchange, RoutingKey}).
-
-cleanup(Pid) ->
-  call({cleanup, Pid}).
-
-call(Args) -> gen_server:call(?MODULE, Args).
+stop()         -> cast(stop).
+cleanup(Pid)   -> call({cleanup, Pid}).
+cmd(Cmd, Args, Pid) -> call({cmd, Cmd, Args, Pid}).
 
 %%%_ * gen_server callbacks --------------------------------------------
 init(Args) ->
   case connect(Args) of
-    {ok, ConnectionPid} ->
-      Monitor = erlang:monitor(process, ConnectionPid),
-      {ok, #s{ channels           = orddict:new()
-             , pid2clients        = orddict:new()
-             , connection_pid     = ConnectionPid
-             , connection_monitor = Monitor
+    {ok, Pid} ->
+      Ref = erlang:monitor(process, Pid),
+      {ok, #s{ clientpid_to_channel    = dict:new()
+             , channelpid_to_clientpid = dict:new()
+             , connection_pid          = Pid
+             , connection_ref          = Ref
              }};
     {error, Rsn} ->
       {stop, Rsn}
   end.
 
-handle_call({subscribe, Pid, Queue, Ops}, From, S0) ->
-  {CPid, S} = maybe_new(Pid, S0),
-  simple_amqp_channel:subscribe(CPid, From, Queue, Ops),
-  {noreply, S};
-
-handle_call({unsubscribe, Pid, Queue, Ops}, From,
-            #s{channels = Channels} = S) ->
-  case orddict:find(Pid, Channels) of
-    {ok, #channel{pid = CPid}} ->
-      simple_amqp_channel:unsubscribe(CPid, From, Queue, Ops),
+handle_call({cmd, unsubscribe, Args, Pid}, From,
+            #s{clientpid_to_channel = CDict} = S) ->
+  case dict:find(Pid, CDict) of
+    {ok, #channel{pid = ChannelPid}} ->
+      simple_amqp_channel:cmd(ChannelPid, From, unsubscribe, Args),
       {noreply, S};
     error ->
-      {reply, {error, no_subscription}, S}
+      {reply, {error, not_subscribed}, S}
   end;
 
-handle_call({publish, Pid, Exchange, RoutingKey, Payload, Ops}, From,
-            S0) ->
-  {CPid, S} = maybe_new(Pid, S0),
-  simple_amqp_channel:publish(CPid,
-                              From, Exchange, RoutingKey, Payload, Ops),
+handle_call({cmd, Cmd, Args, Pid}, From, S0) ->
+  {ChannelPid, S} = maybe_new(Pid, S0),
+  simple_amqp_channel:cmd(ChannelPid, From, Cmd, Args),
   {noreply, S};
 
-handle_call({Method, Pid, Exchange, Ops}, From, S0)
-  when Method == exchange_declare;
-       Method == exchange_delete ->
-  {CPid, S} = maybe_new(Pid, S0),
-  simple_amqp_channel:Method(CPid, From, Exchange, Ops),
-  {noreply, S};
-
-handle_call({Method, Pid, Queue, Ops}, From, S0)
-  when Method == queue_declare;
-       Method == queue_delete ->
-  {CPid, S} = maybe_new(Pid, S0),
-  simple_amqp_channel:Method(CPid, From, Queue, Ops),
-  {noreply, S};
-
-handle_call({Method, Pid, Queue, Exchange, RoutingKey}, From, S0)
-  when Method == bind;
-       Method == unbind ->
-  {CPid, S} = maybe_new(Pid, S0),
-  simple_amqp_channel:Method(CPid, From, Queue, Exchange, RoutingKey),
-  {noreply, S};
-
-handle_call({cleanup, Pid}, _From, S0) ->
-  S = maybe_delete(Pid, S0),
-  {reply, ok, S}.
+handle_call({cleanup, Pid}, _From,
+            #s{clientpid_to_channel = CDict} = S0) ->
+  case dict:is_key(Pid, CDict) of
+    true  -> {reply, ok, delete(Pid, S0)};
+    false -> {reply, ok, S0}
+  end.
 
 handle_cast(stop, S) ->
   {stop, normal, S}.
 
-handle_info({'DOWN', CMon, process, CPid, Rsn},
-            #s{ connection_pid     = CPid
-              , connection_monitor = CMon
+handle_info({'DOWN', Ref, process, Pid, Rsn},
+            #s{ connection_pid = Pid
+              , connection_ref = Ref
               } = S) ->
   {stop, Rsn, S};
 
 handle_info({'DOWN', _Mon, process, Pid, Rsn},
-            #s{pid2clients = Pid2Clients} = S0) ->
-  error_logger:info_msg("Channel died (~p): ~p~n", [?MODULE, Rsn]),
-  S = maybe_delete(orddict:fetch(Pid, Pid2Clients), S0),
-  {noreply, S};
+            #s{channelpid_to_clientpid = CDict} = S) ->
+  case dict:find(Pid, CDict) of
+    {ok, ChannelPid} ->
+      error_logger:info_msg("Channel died (~p): ~p~n", [?MODULE, Rsn]),
+      {noreply, delete(ChannelPid, S)};
+    error ->
+      error_logger:info_msg("monitored process died, "
+                            "investigate! (~p): ~p~n", [?MODULE, Rsn]),
+      {noreply, S}
+  end;
 
 handle_info(_Info, S) ->
   {noreply, S}.
 
-terminate(_Rsn, #s{ connection_pid = ConnectionPid
-                  , channels       = Channels}) ->
-  orddict:fold(fun(CPid, #channel{}, _) ->
-                   simple_amqp_channel:stop(CPid)
-               end, '_', Channels),
+terminate(_Rsn, #s{ connection_pid       = ConnectionPid
+                  , connection_ref       = ConnectionRef
+                  , clientpid_to_channel = CDict}) ->
+  dict:fold(fun(_ClientPid, #channel{ pid = Pid
+                                    , ref = Ref}, '_') ->
+                erlang:demonitor(Ref, [flush]),
+                simple_amqp_channel:stop(Pid)
+            end, '_', CDict),
+  erlang:demonitor(ConnectionRef, [flush]),
   ok = amqp_connection:close(ConnectionPid).
 
 code_change(_OldVsn, S, _Extra) ->
   {ok, S}.
 
 %%%_ * Internals -------------------------------------------------------
-maybe_new(ClientPid, #s{ connection_pid = ConnectionPid
-                       , channels       = Channels0
-                       , pid2clients    = Pid2Clients0} = S0) ->
-  case orddict:find(ClientPid, Channels0) of
-    {ok, #channel{pid = CPid}} -> {CPid, S0};
-    error                      ->
-      Args = orddict:from_list([ {connection_pid, ConnectionPid}
-                               , {client_pid,     ClientPid}
-                               ]),
-      {ok, CPid}  = simple_amqp_channel:start(Args),
-      CMon        = erlang:monitor(process, CPid),
-      Channel     = #channel{ pid     = CPid
-                            , monitor = CMon},
-      Channels    = orddict:store(ClientPid, Channel, Channels0),
-      Pid2Clients = orddict:store(CPid, ClientPid, Pid2Clients0),
-      {CPid, S0#s{ channels    = Channels
-                 , pid2clients = Pid2Clients}}
+maybe_new(ClientPid, #s{ connection_pid          = ConnectionPid
+                       , clientpid_to_channel    = Channels0
+                       , channelpid_to_clientpid = Clients0} = S0) ->
+
+  case dict:find(ClientPid, Channels0) of
+    {ok, #channel{pid = ChannelPid}} ->
+      {ChannelPid, S0};
+    error ->
+      Args = [ {connection_pid, ConnectionPid}
+             , {client_pid,     ClientPid}
+             ],
+      {ok, ChannelPid}  = simple_amqp_channel:start(Args),
+      ChannelRef        = erlang:monitor(process, ChannelPid),
+      Channel = #channel{ pid = ChannelPid
+                        , ref = ChannelRef},
+      Channels = dict:store(ClientPid,  Channel,   Channels0),
+      Clients  = dict:store(ChannelPid, ClientPid, Clients0),
+      {ChannelPid, S0#s{ clientpid_to_channel    = Channels
+                       , channelpid_to_clientpid = Clients}}
   end.
 
-maybe_delete(ClientPid, #s{ channels    = Channels
-                          , pid2clients = Pid2Clients} = S) ->
-  case orddict:find(ClientPid, Channels) of
-    {ok, #channel{ pid     = ChannelPid
-                 , monitor = ChannelMonitor}} ->
-      erlang:demonitor(ChannelMonitor, [flush]),
-      simple_amqp_channel:stop(ChannelPid),
-      S#s{ channels    = orddict:erase(ClientPid, Channels)
-         , pid2clients = orddict:erase(ChannelPid, Pid2Clients)};
-    error -> S
-  end.
+delete(ClientPid, #s{ clientpid_to_channel = Channels
+                    , channelpid_to_clientpid = Clients} = S) ->
+  #channel{ pid = ChannelPid
+          , ref = ChannelRef} = dict:fetch(ClientPid, Channels),
+  true = dict:is_key(ChannelPid, Clients),
+
+  erlang:demonitor(ChannelRef, [flush]),
+  simple_amqp_channel:stop(ChannelPid),
+  S#s{ clientpid_to_channel    = dict:erase(ClientPid,  Channels)
+     , channelpid_to_clientpid = dict:erase(ChannelPid, Clients)}.
 
 connect(Args) ->
-  do_connect(orddict:fetch(brokers, Args)).
+  do_connect(proplists:get_value(brokers, Args)).
 
 do_connect([]) -> {error, no_working_brokers};
 do_connect([{Type, Conf}|T]) ->
@@ -241,7 +187,8 @@ params(network, Args) ->
                       , port         = F(port)
                       }.
 
-
+call(Args) -> gen_server:call(?MODULE, Args).
+cast(Args) -> gen_server:cast(?MODULE, Args).
 %%%_* Emacs ============================================================
 %%% Local Variables:
 %%% allout-layout: t

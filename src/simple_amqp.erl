@@ -36,7 +36,7 @@ subscribe(Pid, Queue) ->
   subscribe(Pid, Queue, []).
 
 subscribe(Pid, Queue, Ops) ->
-  simple_amqp_server:subscribe(Pid, Queue, Ops).
+  simple_amqp_server:cmd(subscribe, [Queue, Ops], Pid).
 
 %% @spec unsubscribe(Pid::pid(), Queue::binary()) ->
 %%                   ok | {error, Rsn}
@@ -45,7 +45,7 @@ unsubscribe(Pid, Queue) ->
   unsubscribe(Pid, Queue, []).
 
 unsubscribe(Pid, Queue, Ops) ->
-  simple_amqp_server:unsubscribe(Pid, Queue, Ops).
+  simple_amqp_server:cmd(unsubscribe, [Queue, Ops], Pid).
 
 %% @spec unsubscribe(Pid::pid(), Exchange::binary(),
 %%                   RoutingKey::binary(), Payload::any()) ->
@@ -55,7 +55,9 @@ publish(Pid, Exchange, RoutingKey, Payload) ->
   publish(Pid, Exchange, RoutingKey, Payload, []).
 
 publish(Pid, Exchange, RoutingKey, Payload, Ops) ->
-  simple_amqp_server:publish(Pid, Exchange, RoutingKey, Payload, Ops).
+  simple_amqp_server:cmd(publish,
+                         [Exchange, RoutingKey, Payload, Ops],
+                         Pid).
 
 %% @spec exchange_declare(Pid::pid(), Exchange) -> ok | {error, Rsn}
 %% @doc declare a new exchange
@@ -63,7 +65,7 @@ exchange_declare(Pid, Exchange) ->
   exchange_declare(Pid, Exchange, []).
 
 exchange_declare(Pid, Exchange, Ops) ->
-  simple_amqp_server:exchange_declare(Pid, Exchange, Ops).
+  simple_amqp_server:cmd(exchange_declare, [Exchange, Ops], Pid).
 
 %% @spec exchange_delete(Pid::pid(), Exchange) -> ok | {error, Rsn}
 %% @doc delete an exchange
@@ -71,7 +73,7 @@ exchange_delete(Pid, Exchange) ->
   exchange_delete(Pid, Exchange, []).
 
 exchange_delete(Pid, Exchange, Ops) ->
-  simple_amqp_server:exchange_delete(Pid, Exchange, Ops).
+  simple_amqp_server:cmd(exchange_delete, [Exchange, Ops], Pid).
 
 %% @spec queue_declare(Pid::pid(), Queue) -> {ok, Queue} | {error, Rsn}
 %% @doc declare a new queue
@@ -79,7 +81,7 @@ queue_declare(Pid, Queue) ->
   queue_declare(Pid, Queue, []).
 
 queue_declare(Pid, Queue, Ops) ->
-  simple_amqp_server:queue_declare(Pid, Queue, Ops).
+  simple_amqp_server:cmd(queue_declare, [Queue, Ops], Pid).
 
 %% @spec queue_delete(Pid::pid(), Queue) -> ok | {error, Rsn}
 %% @doc delete a queue
@@ -87,17 +89,19 @@ queue_delete(Pid, Queue) ->
   queue_delete(Pid, Queue, []).
 
 queue_delete(Pid, Queue, Ops) ->
-  simple_amqp_server:queue_delete(Pid, Queue, Ops).
+  simple_amqp_server:cmd(queue_delete, [Queue, Ops], Pid).
 
-%% @spec bind(Pid::pid(), Queue, Exchange, RoutingKey) -> ok | {error, Rsn}
+%% @spec bind(Pid::pid(), Queue, Exchange, RoutingKey) ->
+%%            ok | {error, Rsn}
 %% @doc create routing rule
 bind(Pid, Queue, Exchange, RoutingKey) ->
-  simple_amqp_server:bind(Pid, Queue, Exchange, RoutingKey).
+  simple_amqp_server:cmd(bind, [Queue, Exchange, RoutingKey], Pid).
 
-%% @spec unbind(Pid::pid(), Queue, Exchange, RoutingKey) -> ok | {error, Rsn}
+%% @spec unbind(Pid::pid(), Queue, Exchange, RoutingKey) ->
+%%              ok | {error, Rsn}
 %% @doc remote a routing rule
 unbind(Pid, Queue, Exchange, RoutingKey) ->
-  simple_amqp_server:unbind(Pid, Queue, Exchange, RoutingKey).
+  simple_amqp_server:cmd(unbind, [Queue, Exchange, RoutingKey], Pid).
 
 %% @spec unsubscribe(Pid::pid()) -> ok | {error, Rsn}
 %% @doc Cleanup after pid (channel, gen_server, etc).
