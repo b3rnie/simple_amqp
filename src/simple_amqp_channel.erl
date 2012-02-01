@@ -70,20 +70,48 @@ handle_call(sync, _From, S) ->
 handle_cast(stop, S) ->
   {stop, normal, S};
 
-handle_cast({cmd, subscribe, [Queue, Ops], From},
-            #s{ channel_pid = ChannelPid
-              , subs        = Subs0} = S) ->
+handle_cast({cmd, Cmd, Args, From}, S0) ->
+  case safe_do_cmd(Cmd, Args, From, S0) of
+    {{reply, Res}, S} ->
+      gen_server:reply(From, Res),
+      {noreply, S};
+    {noreply, S} ->
+      {noreply, S}
+  end.
+
+handle_info(Info, S0) ->
+  case do_info(Info, S0) of
+    {noreply, S}   -> {noreply, S};
+    {stop, Rsn, S} -> {stop, Rsn, S}
+  end.
+
+terminate(_Reason, #s{ channel_pid = ChannelPid
+                     , channel_ref = ChannelRef
+                     , client_ref  = ClientRef}) ->
+  erlang:demonitor(ChannelRef, [flush]),
+  erlang:demonitor(ClientRef,  [flush]),
+  ok = amqp_channel:close(ChannelPid).
+
+code_change(_OldVsn, S, _Extra) ->
+  {ok, S}.
+
+%%%_ * Internals -------------------------------------------------------
+safe_do_cmd(Cmd, Args, From, S) ->
+  try do_cmd(Cmd, Args, From, S)
+  catch Class:Term ->
+      {{reply, {error, {Class, Term}}}, S}
+  end.
+
+do_cmd(subscribe, [Queue, Ops], From,
+       #s{ channel_pid = ChannelPid
+         , subs        = Subs0} = S) ->
   case dict:find(Queue, Subs0) of
     {ok, #sub{state = open}} ->
-      %% gen_server:reply(From, {error, already_subscribed}),
-      gen_server:reply(From, {ok, self()}),
-      {noreply, S};
+      {{reply, {ok, self()}}, S};
     {ok, #sub{state = {setup, _From}}} ->
-      gen_server:reply(From, {error, setup_in_progress}),
-      {noreply, S};
+      {{reply, {error, setup_in_progress}}, S};
     {ok, #sub{state = {close, _From}}} ->
-      gen_server:reply(From, {error, close_in_progress}),
-      {noreply, S};
+      {{reply, {error, close_in_progress}}, S};
     error ->
       Qos = #'basic.qos'{prefetch_count = 1},
       #'basic.qos_ok'{} = amqp_channel:call(ChannelPid, Qos),
@@ -100,16 +128,14 @@ handle_cast({cmd, subscribe, [Queue, Ops], From},
       {noreply, S#s{subs = Subs}}
   end;
 
-handle_cast({cmd, unsubscribe, [Queue, _Ops], From},
-            #s{ channel_pid   = ChannelPid
-              , subs          = Subs0} = S) ->
+do_cmd(unsubscribe, [Queue, _Ops], From,
+       #s{ channel_pid   = ChannelPid
+         , subs          = Subs0} = S) ->
   case dict:find(Queue, Subs0) of
     {ok, #sub{state = {close, _From}}} ->
-      gen_server:reply(From, {error, close_in_progress}),
-      {noreply, S};
+      {{reply, {error, close_in_progress}}, S};
     {ok, #sub{state = {setup, _From}}} ->
-      gen_server:reply(From, {error, setup_in_progress}),
-      {noreply, S};
+      {{reply, {error, setup_in_progress}}, S};
     {ok, #sub{state = open} = Sub0} ->
       Cancel = #'basic.cancel'{consumer_tag = Queue},
       #'basic.cancel_ok'{} = amqp_channel:call(ChannelPid, Cancel),
@@ -117,12 +143,11 @@ handle_cast({cmd, unsubscribe, [Queue, _Ops], From},
       Subs = dict:store(Queue, Sub, Subs0),
       {noreply, S#s{subs = Subs}};
     error ->
-      gen_server:reply(From, {error, not_subscribed}),
-      {noreply, S}
+      {{reply, {error, not_subscribed}}, S}
   end;
 
-handle_cast({cmd, publish, [Exchange, RoutingKey, Payload, Ops], From},
-            #s{channel_pid = ChannelPid} = S) ->
+do_cmd(publish, [Exchange, RoutingKey, Payload, Ops], _From,
+       #s{channel_pid = ChannelPid} = S) ->
   Publish = #'basic.publish'{
      exchange    = Exchange
    , routing_key = RoutingKey
@@ -136,11 +161,10 @@ handle_cast({cmd, publish, [Exchange, RoutingKey, Payload, Ops], From},
                  , props   = Props
                  },
   ok = amqp_channel:cast(ChannelPid, Publish, Msg),
-  gen_server:reply(From, ok),
-  {noreply, S};
+  {{reply, ok}, S};
 
-handle_cast({cmd, exchange_declare, [Exchange, Ops], From},
-            #s{channel_pid = ChannelPid} = S) ->
+do_cmd(exchange_declare, [Exchange, Ops], _From,
+       #s{channel_pid = ChannelPid} = S) ->
   Declare = #'exchange.declare'{
      exchange    = Exchange
    , ticket      = ops(ticket,      Ops, 0)
@@ -153,11 +177,10 @@ handle_cast({cmd, exchange_declare, [Exchange, Ops], From},
    , arguments   = ops(arguments,   Ops, [])
    },
   #'exchange.declare_ok'{} = amqp_channel:call(ChannelPid, Declare),
-  gen_server:reply(From, ok),
-  {noreply, S};
+  {{reply, ok}, S};
 
-handle_cast({cmd, exchange_delete, [Exchange, Ops], From},
-            #s{channel_pid = ChannelPid} = S) ->
+do_cmd(exchange_delete, [Exchange, Ops], _From,
+       #s{channel_pid = ChannelPid} = S) ->
   Delete = #'exchange.delete'{
      exchange  = Exchange
    , ticket    = ops(ticket, Ops, 0)
@@ -165,11 +188,10 @@ handle_cast({cmd, exchange_delete, [Exchange, Ops], From},
    , nowait    = ops(nowait, Ops, false)
    },
   #'exchange.delete_ok'{} = amqp_channel:call(ChannelPid, Delete),
-  gen_server:reply(From, ok),
-  {noreply, S};
+  {{reply, ok}, S};
 
-handle_cast({cmd, queue_declare, [Queue0, Ops], From},
-            #s{channel_pid = ChannelPid} = S) ->
+do_cmd(queue_declare, [Queue0, Ops], _From,
+       #s{channel_pid = ChannelPid} = S) ->
   Declare = #'queue.declare'{
      queue       = Queue0
    , ticket      = ops(ticket,      Ops, 0)
@@ -182,11 +204,10 @@ handle_cast({cmd, queue_declare, [Queue0, Ops], From},
    },
   #'queue.declare_ok'{queue = Queue} =
     amqp_channel:call(ChannelPid, Declare),
-  gen_server:reply(From, {ok, Queue}),
-  {noreply, S};
+  {{reply, {ok, Queue}}, S};
 
-handle_cast({cmd, queue_delete, [Queue, Ops], From},
-            #s{channel_pid = ChannelPid} = S) ->
+do_cmd(queue_delete, [Queue, Ops], _From,
+       #s{channel_pid = ChannelPid} = S) ->
   Delete = #'queue.delete'{
      queue = Queue
    , ticket    = ops(ticket, Ops, 0)
@@ -196,49 +217,46 @@ handle_cast({cmd, queue_delete, [Queue, Ops], From},
    },
   #'queue.delete_ok'{message_count = _MessageCount} =
     amqp_channel:call(ChannelPid, Delete),
-  gen_server:reply(From, ok),
-  {noreply, S};
+  {{reply, ok}, S};
 
-handle_cast({cmd, bind, [Queue, Exchange, RoutingKey], From},
-            #s{channel_pid = ChannelPid} = S) ->
+do_cmd(bind, [Queue, Exchange, RoutingKey], _From,
+       #s{channel_pid = ChannelPid} = S) ->
   Binding = #'queue.bind'{ queue       = Queue
                          , exchange    = Exchange
                          , routing_key = RoutingKey},
   #'queue.bind_ok'{} = amqp_channel:call(ChannelPid, Binding),
-  gen_server:reply(From, ok),
-  {noreply, S};
+  {{reply, ok}, S};
 
-handle_cast({cmd, unbind, [Queue, Exchange, RoutingKey], From},
-            #s{channel_pid = ChannelPid} = S) ->
+do_cmd(unbind, [Queue, Exchange, RoutingKey], _From,
+       #s{channel_pid = ChannelPid} = S) ->
   Binding = #'queue.unbind'{ queue       = Queue
                            , exchange    = Exchange
                            , routing_key = RoutingKey},
   #'queue.unbind_ok'{} = amqp_channel:call(ChannelPid, Binding),
-  gen_server:reply(From, ok),
-  {noreply, S}.
+  {{reply, ok}, S}.
 
-handle_info(#'basic.consume_ok'{consumer_tag = Queue},
-            #s{subs = Subs0} = S) ->
+do_info(#'basic.consume_ok'{consumer_tag = Queue},
+        #s{subs = Subs0} = S) ->
   ?amqp_dbg("basic.consume_ok (consumer_tag = ~p)~n", [Queue]),
   #sub{state = {setup, From}} = Sub = dict:fetch(Queue, Subs0),
   gen_server:reply(From, {ok, self()}),
   Subs = dict:store(Queue, Sub#sub{state = open}, Subs0),
   {noreply, S#s{subs = Subs}};
 
-handle_info(#'basic.cancel_ok'{consumer_tag = Queue},
-            #s{subs = Subs0} = S) ->
+do_info(#'basic.cancel_ok'{consumer_tag = Queue},
+        #s{subs = Subs0} = S) ->
   ?amqp_dbg("basic.cancel_ok (consumer_tag = ~p)~n", [Queue]),
   #sub{state = {close, From}} = dict:fetch(Queue, Subs0),
   gen_server:reply(From, ok),
   Subs = dict:erase(Queue, Subs0),
   {noreply, S#s{subs = Subs}};
 
-handle_info({#'basic.deliver'{ consumer_tag = ConsumerTag
-                             , delivery_tag = DeliveryTag
-                             , exchange     = Exchange
-                             , routing_key  = RoutingKey},
-             #amqp_msg{payload = Payload}},
-            #s{client_pid = ClientPid} = S) ->
+do_info({#'basic.deliver'{ consumer_tag = ConsumerTag
+                         , delivery_tag = DeliveryTag
+                         , exchange     = Exchange
+                         , routing_key  = RoutingKey},
+         #amqp_msg{payload = Payload}},
+        #s{client_pid = ClientPid} = S) ->
   ?amqp_dbg("basic.deliver~n"
             "(consumer_tag = ~p)~n"
             "(delivery_tag = ~p)~n"
@@ -248,8 +266,9 @@ handle_info({#'basic.deliver'{ consumer_tag = ConsumerTag
   ClientPid ! {msg, self(), DeliveryTag, RoutingKey, Payload},
   {noreply, S};
 
-handle_info({#'basic.return'{ reply_text = <<"unroutable">> = Text
-                            , exchange   = Exchange}, Payload}, _S) ->
+do_info({#'basic.return'{ reply_text = <<"unroutable">> = Text
+                        , exchange   = Exchange}, Payload},
+        _S) ->
   ?amqp_dbg("basic.return~n"
             "(reply_text = ~p)~n"
             "(exchange   = ~p)~n",
@@ -257,42 +276,29 @@ handle_info({#'basic.return'{ reply_text = <<"unroutable">> = Text
   %% slightly drastic for now.
   {stop, {unroutable, Exchange, Payload}};
 
-handle_info({ack, Tag}, #s{channel_pid = ChannelPid} = S) ->
+do_info({ack, Tag},
+        #s{channel_pid = ChannelPid} = S) ->
   Ack = #'basic.ack'{delivery_tag = Tag},
   amqp_channel:cast(ChannelPid, Ack),
   {noreply, S};
 
-handle_info({'DOWN', ChannelRef, process, ChannelPid, Rsn},
-            #s{ channel_pid     = ChannelPid
-              , channel_ref = ChannelRef} = S) ->
+do_info({'DOWN', ChannelRef, process, ChannelPid, Rsn},
+        #s{ channel_pid = ChannelPid
+          , channel_ref = ChannelRef} = S) ->
   error_logger:info_msg("Channel died: ~p~n", [Rsn]),
-
-  %%simple_amqp_server:cleanup(S#s.client_pid),
-  %%{noreply, S};
   {stop, Rsn, S};
 
-handle_info({'DOWN', ClientRef, process, ClientPid, Rsn},
-            #s{ client_pid     = ClientPid
-              , client_ref = ClientRef} = S) ->
+do_info({'DOWN', ClientRef, process, ClientPid, Rsn},
+        #s{ client_pid     = ClientPid
+          , client_ref = ClientRef} = S) ->
   error_logger:info_msg("Client died: ~p~n", [Rsn]),
   %%ok = simple_amqp_server:cleanup(ClientPid),
   {stop, Rsn, S};
 
-handle_info(Info, S) ->
-  io:format("WEIRD INFO: ~p~n", [Info]),
+do_info(Info, S) ->
+  error_logger:info_msg("spurious info msg: ~p~n", [Info]),
   {noreply, S}.
 
-terminate(_Reason, #s{ channel_pid = ChannelPid
-                     , channel_ref = ChannelRef
-                     , client_ref  = ClientRef}) ->
-  erlang:demonitor(ChannelRef, [flush]),
-  erlang:demonitor(ClientRef,  [flush]),
-  ok = amqp_channel:close(ChannelPid).
-
-code_change(_OldVsn, S, _Extra) ->
-  {ok, S}.
-
-%%%_ * Internals -------------------------------------------------------
 ops(K,Ops,Def) -> proplists:get_value(K,Ops,Def).
 
 cast(Pid, Args) -> gen_server:cast(Pid, Args).
