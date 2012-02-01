@@ -275,8 +275,8 @@ handle_info({'DOWN', ClientRef, process, ClientPid, Rsn},
             #s{ client_pid     = ClientPid
               , client_ref = ClientRef} = S) ->
   error_logger:info_msg("Client died: ~p~n", [Rsn]),
-  ok = simple_amqp_server:cleanup(ClientPid),
-  {noreply, S};
+  %%ok = simple_amqp_server:cleanup(ClientPid),
+  {stop, Rsn, S};
 
 handle_info(Info, S) ->
   io:format("WEIRD INFO: ~p~n", [Info]),

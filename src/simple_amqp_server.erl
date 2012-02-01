@@ -11,8 +11,8 @@
 -export([ start/1
         , start_link/1
         , stop/0
-        , cleanup/1
-        , cmd/3
+        , cleanup/0
+        , cmd/2
         ]).
 
 -export([ init/1
@@ -47,8 +47,8 @@ start_link(Args) ->
   gen_server:start_link({local, ?MODULE}, ?MODULE, Args, []).
 
 stop()         -> cast(stop).
-cleanup(Pid)   -> call({cleanup, Pid}).
-cmd(Cmd, Args, Pid) -> call({cmd, Cmd, Args, Pid}).
+cleanup()      -> call(cleanup).
+cmd(Cmd, Args) -> call({cmd, Cmd, Args}).
 
 %%%_ * gen_server callbacks --------------------------------------------
 init(Args) ->
@@ -64,7 +64,7 @@ init(Args) ->
       {stop, Rsn}
   end.
 
-handle_call({cmd, unsubscribe, Args, Pid}, From,
+handle_call({cmd, unsubscribe, Args}, {Pid, _} = From,
             #s{clientpid_to_channel = CDict} = S) ->
   case dict:find(Pid, CDict) of
     {ok, #channel{pid = ChannelPid}} ->
@@ -74,12 +74,12 @@ handle_call({cmd, unsubscribe, Args, Pid}, From,
       {reply, {error, not_subscribed}, S}
   end;
 
-handle_call({cmd, Cmd, Args, Pid}, From, S0) ->
+handle_call({cmd, Cmd, Args}, {Pid, _} = From, S0) ->
   {ChannelPid, S} = maybe_new(Pid, S0),
   simple_amqp_channel:cmd(ChannelPid, From, Cmd, Args),
   {noreply, S};
 
-handle_call({cleanup, Pid}, _From,
+handle_call(cleanup, {Pid, _} = _From,
             #s{clientpid_to_channel = CDict} = S0) ->
   case dict:is_key(Pid, CDict) of
     true  -> {reply, ok, delete(Pid, S0)};
