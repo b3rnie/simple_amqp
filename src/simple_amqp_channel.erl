@@ -155,8 +155,10 @@ do_cmd(publish, [Exchange, RoutingKey, Payload, Ops], _From,
    , immediate   = ops(immediate, Ops, false) %%true
    },
 
-  Props = #'P_basic'{delivery_mode = 2}, %% 1 not persistent
-                                         %% 2 persistent
+  Props = #'P_basic'{
+    delivery_mode = 2, %% 1 not persistent, 2 persistent
+    correlation_id = ops(correlation_id, Ops, false)
+   },
   Msg = #amqp_msg{ payload = Payload
                  , props   = Props
                  },
@@ -255,7 +257,9 @@ do_info({#'basic.deliver'{ consumer_tag = ConsumerTag
                          , delivery_tag = DeliveryTag
                          , exchange     = Exchange
                          , routing_key  = RoutingKey},
-         #amqp_msg{payload = Payload}},
+         #amqp_msg{payload = Payload,
+		   props = #'P_basic'{reply_to=To,
+				      correlation_id=Id}} },
         #s{client_pid = ClientPid} = S) ->
   ?amqp_dbg("basic.deliver~n"
             "(consumer_tag = ~p)~n"
@@ -263,7 +267,7 @@ do_info({#'basic.deliver'{ consumer_tag = ConsumerTag
             "(exchange     = ~p)~n"
             "(routing_key  = ~p)~n",
             [ConsumerTag, DeliveryTag, Exchange, RoutingKey]),
-  ClientPid ! {msg, self(), DeliveryTag, RoutingKey, Payload},
+  ClientPid ! {msg, self(), DeliveryTag, RoutingKey, Payload, To, Id},
   {noreply, S};
 
 do_info({#'basic.return'{ reply_text = <<"unroutable">> = Text
