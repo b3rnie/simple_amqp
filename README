@@ -1,0 +1,2 @@
+Wrapper around the amqp_client Erlang library for RabbitMQ.
+
