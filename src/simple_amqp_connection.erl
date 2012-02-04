@@ -10,6 +10,7 @@
 %%%_* Exports ==========================================================
 -export([ start_link/1
         , stop/1
+        , connect/2
         ]).
 
 -export([ init/1
@@ -28,26 +29,34 @@
 
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
--record(s, { connection %% {pid, ref} | undefined
-           , brokers    %% [{type, conf}]
+-record(s, { brokers     %% [{type, conf}]
+           , connections
            }).
 
 %%%_ * API -------------------------------------------------------------
 start_link(Args) -> gen_server:start_link(?MODULE, Args, []).
 stop(Pid)        -> gen_server:cast(Pid, stop).
+connect(Pid, N)  -> gen_server:cast(Pid, {connect, N}).
 
 %%%_ * gen_server callbacks --------------------------------------------
 init(Args) ->
-  {ok, #s{brokers  = proplists:get_value(brokers, Args)}, 0}.
+  {ok, #s{ brokers     = proplists:get_value(brokers, Args)
+         , connections = 0}}.
 
 handle_call(sync, _From, S) ->
   {reply, ok, S, 0}.
 
+handle_cast({connect, N}, S) ->
+  {noreply, S#s{connections = S#s.connections + N}, 0};
+
 handle_cast(stop, S) ->
   {stop, normal, S}.
 
-handle_info(timeout, #s{ connection = undefined
-                       , brokers    = [{Type, Conf} | Brokers]} = S0) ->
+handle_info(timeout, #s{connections = 0} = S) ->
+  {noreply, S};
+
+handle_info(timeout, #s{brokers = [{Type, Conf} | Brokers]} = S0) ->
+  true = S0#s.connections > 0,
   error_logger:info_msg("trying to connect (~p): ~p~n",
                         [?MODULE, {Type, Conf}]),
   case amqp_connection:start(params(Type, Conf)) of
@@ -55,10 +64,10 @@ handle_info(timeout, #s{ connection = undefined
       %% xxx better logging
       error_logger:info_msg("connect successful (~p): ~p~n",
                             [?MODULE, Pid]),
-      S = S0#s{ connection = {Pid, erlang:monitor(process, Pid)}
-              , brokers    = [{Type, Conf} | Brokers]},
+      S = S0#s{ connections = S0#s.connections - 1
+              , brokers     = [{Type, Conf} | Brokers]},
       simple_amqp_server:add_connection(Pid),
-      {noreply, S};
+      {noreply, S, 0};
     {error, Rsn} ->
       error_logger:error_msg("connect failed (~p): ~p~n",
                              [?MODULE, Rsn]),
@@ -66,22 +75,11 @@ handle_info(timeout, #s{ connection = undefined
        ?retry_interval}
   end;
 
-handle_info({'DOWN', Ref, process, Pid, Rsn},
-            #s{connection = {Pid, Ref}} = S) ->
-  error_logger:info_msg("connection died (~p): ~p~n", [?MODULE, Rsn]),
-  erlang:demonitor(Ref, [flush]),
-  simple_amqp_server:del_connection(Pid),
-  {noreply, S#s{connection = undefined}, 0};
-
 handle_info(Info, S) ->
   error_logger:info_msg("weird info message, investigate (~p): ~p~n",
                         [?MODULE, Info]),
   {noreply, S}.
 
-terminate(_Rsn, #s{connection = {Pid, Ref}}) ->
-  error_logger:info_msg("closing connection (~p): ~p~n", [?MODULE, Pid]),
-  erlang:demonitor(Ref, [flush]),
-  ok = amqp_connection:close(Pid);
 terminate(_Rsn, _S) ->
   ok.
 
