@@ -9,7 +9,6 @@
 
 %%%_* Exports ==========================================================
 -export([ start/1
-        , start_link/1
         , stop/1
         , cmd/4
         ]).
@@ -38,8 +37,7 @@
              }).
 
 %%%_ * API -------------------------------------------------------------
-start(Args)      -> gen_server:start(?MODULE, Args, []).
-start_link(Args) -> gen_server:start_link(?MODULE, Args, []).
+start(Args) -> gen_server:start(?MODULE, Args, []).
 
 stop(Pid)                 -> cast(Pid, stop).
 cmd(Pid, Cmd, Args, From) -> cast(Pid, {cmd, Cmd, Args, From}).

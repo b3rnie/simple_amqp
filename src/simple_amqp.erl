@@ -121,9 +121,8 @@ basic_test() ->
                                  end),
   receive {ok, Consumer} -> ok end,
   ok = basic_close(Exchange, Queue, RK),
-  lists:foreach(fun(Pid) ->
-                    ok = simple_amqp:cleanup()
-                end, [Daddy, Consumer, Producer]),
+  ok = simple_amqp:cleanup(),
+  ok = simple_amqp:cleanup(),
   application:stop(?MODULE),
   ok.
 
@@ -132,8 +131,12 @@ basic_producer(_Daddy, X, RK) ->
   lists:foreach(F, basic_dataset()).
 
 basic_consumer(Daddy, Queue) ->
+  {error, not_subscribed} = simple_amqp:unsubscribe(Queue),
+  {ok, Pid} = simple_amqp:subscribe(Queue),
   {ok, Pid} = simple_amqp:subscribe(Queue),
   basic_consumer_consume(Pid, basic_dataset()),
+  ok = simple_amqp:unsubscribe(Queue),
+  {error, not_subscribed} = simple_amqp:unsubscribe(Queue),
   Daddy ! {ok, self()}.
 
 basic_consumer_consume(Pid, []) -> ok;
@@ -150,7 +153,9 @@ basic_setup(X, Q0, RK) ->
   Q.
 
 basic_close(X, Q, RK) ->
-  ok = simple_amqp:unbind(Q, X, RK).
+  ok = simple_amqp:unbind(Q, X, RK),
+  ok = simple_amqp:queue_delete(Q),
+  ok = simple_amqp:exchange_delete(X).
 
 basic_dataset() ->
   [term_to_binary(Term) || Term <- [1, 2, 3, 4]].

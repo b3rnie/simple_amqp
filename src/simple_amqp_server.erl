@@ -8,8 +8,7 @@
 -module(simple_amqp_server).
 
 %%%_* Exports ==========================================================
--export([ start/1
-        , start_link/1
+-export([ start_link/1
         , stop/0
         , cleanup/0
         , cmd/2
@@ -38,9 +37,6 @@
            }).
 
 %%%_ * API -------------------------------------------------------------
-start(Args) ->
-  gen_server:start({local, ?MODULE}, ?MODULE, Args, []).
-
 start_link(Args) ->
   gen_server:start_link({local, ?MODULE}, ?MODULE, Args, []).
 
@@ -130,11 +126,14 @@ handle_info(Info, S) ->
 
 terminate(_Rsn, S) ->
   error_logger:info_msg("shutting down (~p)~n", [?MODULE]),
-  lists:foreach(fun({{Pid, Ref}, client, ChannelPid}) ->
-                    ok = try_delete(Pid, Ref, client),
-                    simple_amqp_channel:stop(ChannelPid)
+  lists:foreach(fun({{Pid, Ref}, channel, ClientPid}) ->
+                    simple_amqp_channel:stop(Pid),
+                    receive {'DOWN', Ref, process, Pid, _Rsn} -> ok
+                    end,
+                    ok = try_delete(Pid, Ref, channel)
                 end,
-                ets_select('_', '_', client)),
+                ets_select('_', '_', channel)),
+
   lists:foreach(fun({{Pid, Ref}, connection, _}) ->
                     ok = try_delete(Pid, Ref, connection),
                     amqp_connection:close(Pid)
@@ -195,7 +194,6 @@ ets_insert(Pid, Type, Pid2) ->
 ets_delete(Pid, Ref) ->
   erlang:demonitor(Ref, [flush]),
   ets:delete(?MODULE, {Pid, Ref}).
-
 
 call(Args) -> gen_server:call(?MODULE, Args).
 cast(Args) -> gen_server:cast(?MODULE, Args).
