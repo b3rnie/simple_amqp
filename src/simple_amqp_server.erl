@@ -13,6 +13,9 @@
         , stop/0
         , cleanup/0
         , cmd/2
+        , add_connection/1
+        , del_connection/1
+        , open_connections/0
         ]).
 
 -export([ init/1
@@ -27,12 +30,12 @@
 -include_lib("amqp_client/include/amqp_client.hrl").
 
 %%%_* Macros ===========================================================
--define(tick, 1000).
+-define(connections, 2).
 
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
--record(s, { connection %% {pid, ref}
-           , brokers    %% [{type, conf}]
+-record(s, { connection_handlers
+           , connections
            }).
 
 %%%_ * API -------------------------------------------------------------
@@ -42,80 +45,70 @@ start(Args) ->
 start_link(Args) ->
   gen_server:start_link({local, ?MODULE}, ?MODULE, Args, []).
 
-stop()         -> cast(stop).
-cleanup()      -> call(cleanup).
-cmd(Cmd, Args) -> call({cmd, Cmd, Args}).
+stop()              -> cast(stop).
+cleanup()           -> call(cleanup).
+cmd(Cmd, Args)      -> call({cmd, Cmd, Args}).
+add_connection(Pid) -> cast({add_connection, Pid}).
+del_connection(Pid) -> cast({del_connection, Pid}).
+open_connections()  -> call(open_connections).
 
 %%%_ * gen_server callbacks --------------------------------------------
 init(Args) ->
   ets:new(?MODULE, [named_table, ordered_set, private]),
-  {ok, #s{brokers  = proplists:get_value(brokers, Args)}, 0}.
+  Handlers = setup_connections(?connections, Args),
+  {ok, #s{ connection_handlers = Handlers
+         , connections         = []}}.
 
 handle_call({cmd, unsubscribe, Args}, {Pid, _} = From, S) ->
   case ets_select(Pid, '_', client) of
     [{{Pid, _Ref}, client, ChannelPid}] ->
       simple_amqp_channel:cmd(ChannelPid, unsubscribe, Args, From),
-      {noreply, S, next_tick(S)};
+      {noreply, S};
     [] ->
-      {reply, {error, not_subscribed}, S, next_tick(S)}
+      {reply, {error, not_subscribed}, S}
   end;
 
 handle_call({cmd, Cmd, Args}, {Pid, _} = From, S) ->
-  case maybe_new(Pid, S#s.connection) of
-    {ok, ChannelPid} ->
+  case maybe_new(Pid, S#s.connections) of
+    {ok, {ChannelPid, Connections}} ->
       simple_amqp_channel:cmd(ChannelPid, Cmd, Args, From),
-      {noreply, S, next_tick(S)};
+      {noreply, S#s{connections = Connections}};
     {error, _Rsn} = E ->
-      {reply, E, S, next_tick(S)}
+      {reply, E, S}
   end;
+
+handle_call(open_connections, _From, S) ->
+  {reply, length(S#s.connections), S};
 
 handle_call(cleanup, {Pid, _} = _From, S) ->
   maybe_delete(Pid, [{stop_channel, true}]),
-  {reply, ok, S, next_tick(S)}.
+  {reply, ok, S}.
+
+handle_cast({add_connection, Pid}, S) ->
+  false = lists:member(Pid, S#s.connections),
+  {noreply, S#s{connections = [Pid | S#s.connections]}};
+
+handle_cast({del_connection, Pid}, S) ->
+  true = lists:member(Pid, S#s.connections),
+  {noreply, S#s{connections = S#s.connections -- [Pid]}};
 
 handle_cast(stop, S) ->
   {stop, normal, S}.
-
-handle_info(timeout, #s{ connection = undefined
-                       , brokers    = [{Type, Conf} | Brokers]} = S0) ->
-  error_logger:info_msg("trying to connect (~p)~n", [?MODULE]),
-  case amqp_connection:start(params(Type, Conf)) of
-    {ok, Pid} ->
-      %% xxx better logging
-      error_logger:info_msg("connect successful (~p): ~p~n",
-                            [?MODULE, Pid]),
-      S = S0#s{ connection = {Pid, erlang:monitor(process, Pid)}
-              , brokers    = Brokers ++ [{Type, Conf}]},
-      {noreply, S, next_tick(S)};
-    {error, Rsn} ->
-      error_logger:error_msg("connect failed (~p): ~p~n",
-                             [?MODULE, Rsn]),
-      {noreply, S0, next_tick(S0)}
-  end;
-
-handle_info(timeout, #s{connection = {_Pid, _Ref}} = S) ->
-  {noreply, S, next_tick(S)};
-
-handle_info({'DOWN', Ref, process, Pid, Rsn},
-            #s{connection = {Pid, Ref}} = S) ->
-  error_logger:info_msg("connection died (~p): ~p~n", [?MODULE, Rsn]),
-  erlang:demonitor(Ref, [flush]),
-  {noreply, S#s{connection = undefined}, 0};
 
 handle_info({'DOWN', Ref, process, Pid, Rsn}, S) ->
   case ets_select(Pid, Ref, '_') of
     [{{Pid, Ref}, channel, ClientPid}] ->
       error_logger:info_msg("channel died (~p): ~p~n", [?MODULE, Rsn]),
       maybe_delete(ClientPid, [{stop_channel, false}]),
-      {noreply, S, next_tick(S)};
+      {noreply, S};
     [{{Pid, Ref}, client, _ChannelPid}] ->
       error_logger:info_msg("client died (~p): ~p~n", [?MODULE, Rsn]),
       maybe_delete(Pid, [{stop_channel, true}]),
-      {noreply, S, next_tick(S)};
+      {noreply, S};
     [] ->
       error_logger:info_msg("weird down message, investigate (~p): "
                             "~p~n", [?MODULE, Rsn]),
-      {noreply, S, next_tick(S)}
+      {noreply, S}
   end;
 
 handle_info(Info, S) ->
@@ -129,36 +122,36 @@ terminate(_Rsn, S) ->
                     [simple_amqp_channel:stop(Pid) || Type == channel]
                 end,
                 ets_select('_', '_', '_')),
-  case S#s.connection of
-    {Pid, Ref} ->
-      erlang:demonitor(Ref, [flush]),
-      ok = amqp_connection:close(Pid);
-    undefined -> ok
-  end.
+  lists:foreach(fun(Pid) ->
+                    simple_amqp_connection:stop(Pid)
+                end, S#s.connection_handlers).
 
 code_change(_OldVsn, S, _Extra) ->
   {ok, S}.
 
 %%%_ * Internals -------------------------------------------------------
-maybe_new(ClientPid, Connection) ->
-  ct:pal("XXX: ~p~n", [ets_select(ClientPid, '_', client)]),
+setup_connections(0, _Args) -> [];
+setup_connections(N,  Args) ->
+  {ok, Pid} = simple_amqp_connection:start_link(Args),
+  [Pid | setup_connections(N-1, Args)].
+
+maybe_new(ClientPid, Connections) ->
   case ets_select(ClientPid, '_', client) of
     [{{ClientPid, _Ref}, client, ChannelPid}] ->
-      {ok, ChannelPid};
-    [] when Connection /= undefined ->
-      {ConnectionPid, _ConnectionRef} = Connection,
+      {ok, {ChannelPid, Connections}};
+    [] when Connections /= [] ->
       case simple_amqp_channel:start(
-             [ {connection_pid, ConnectionPid}
+             [ {connection_pid, hd(Connections)}
              , {client_pid,     ClientPid}]) of
         {ok, ChannelPid} ->
           ets_insert(ClientPid,  client,  ChannelPid),
           ets_insert(ChannelPid, channel, ClientPid),
-          {ok, ChannelPid};
+          {ok, {ChannelPid, tl(Connections) ++ [hd(Connections)]}};
         {error, Rsn} ->
           {error, Rsn}
       end;
-    [] when Connection == undefined ->
-      {error, no_connection}
+    [] when Connections == [] ->
+      {error, no_connections}
   end.
 
 maybe_delete(Pid, Ops) ->
@@ -173,9 +166,6 @@ maybe_delete(Pid, Ops) ->
     [] -> ok
   end.
 
-next_tick(_S) ->
-  ?tick.
-
 ets_select(Pid, Ref, Type) ->
   ets:select(?MODULE, [{{{Pid, Ref}, Type, '_'}, [], ['$_']}]).
 
@@ -186,21 +176,6 @@ ets_delete(Pid, Ref) ->
   erlang:demonitor(Ref, [flush]),
   ets:delete(?MODULE, {Pid, Ref}).
 
-params(direct, Args) ->
-  F = fun(K) -> proplists:get_value(K, Args) end,
-  #amqp_params_direct{ username          = F(username)
-                     , virtual_host      = F(virtual_host)
-                     , node              = F(node)
-                     };
-
-params(network, Args) ->
-  F = fun(K) -> proplists:get_value(K, Args) end,
-  #amqp_params_network{ username     = F(username)
-                      , password     = F(password)
-                      , virtual_host = F(virtual_host)
-                      , host         = F(host)
-                      , port         = F(port)
-                      }.
 
 call(Args) -> gen_server:call(?MODULE, Args).
 cast(Args) -> gen_server:cast(?MODULE, Args).

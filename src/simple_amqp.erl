@@ -107,6 +107,7 @@ cleanup() ->
 
 basic_test() ->
   ok = application:start(?MODULE),
+  wait_for_connections(),
   Queue    = <<"test_queue">>,
   Exchange = <<"test_exchange">>,
   RK       = <<"test_routing_key">>,
@@ -138,8 +139,7 @@ basic_consumer(Daddy, Queue) ->
 basic_consumer_consume(Pid, []) -> ok;
 basic_consumer_consume(Pid, Dataset) ->
   receive
-    {msg, Pid, DeliveryTag, _RK, Payload} ->
-      Pid ! {ack, DeliveryTag},
+    {msg, Pid, DeliveryTag, _RK, Payload} ->      Pid ! {ack, DeliveryTag},
       basic_consumer_consume(Pid, Dataset -- [Payload])
   end.
 
@@ -154,6 +154,13 @@ basic_close(X, Q, RK) ->
 
 basic_dataset() ->
   [term_to_binary(Term) || Term <- [1, 2, 3, 4]].
+
+wait_for_connections() ->
+  case simple_amqp_server:open_connections() == 0 of
+    true  -> timer:sleep(100),
+             wait_for_connections();
+    false -> ok
+  end.
 
 -else.
 -endif.
