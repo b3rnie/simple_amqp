@@ -28,7 +28,7 @@
 
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
--record(s, { connection %% {pid, ref}
+-record(s, { connection %% {pid, ref} | undefined
            , brokers    %% [{type, conf}]
            }).
 
@@ -40,7 +40,7 @@ stop(Pid)        -> gen_server:cast(Pid, stop).
 init(Args) ->
   {ok, #s{brokers  = proplists:get_value(brokers, Args)}, 0}.
 
-handle_call(sync, From, S) ->
+handle_call(sync, _From, S) ->
   {reply, ok, S, 0}.
 
 handle_cast(stop, S) ->
@@ -62,7 +62,8 @@ handle_info(timeout, #s{ connection = undefined
     {error, Rsn} ->
       error_logger:error_msg("connect failed (~p): ~p~n",
                              [?MODULE, Rsn]),
-      {noreply, S0, ?retry_interval}
+      {noreply, S0#s{brokers = Brokers ++ [{Type, Conf}]},
+       ?retry_interval}
   end;
 
 handle_info({'DOWN', Ref, process, Pid, Rsn},

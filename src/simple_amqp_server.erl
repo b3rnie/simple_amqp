@@ -118,11 +118,10 @@ handle_info(Info, S) ->
 
 terminate(_Rsn, S) ->
   error_logger:info_msg("shutting down (~p)~n", [?MODULE]),
-  lists:foreach(fun({{Pid, Ref}, Type, _}) ->
-                    erlang:demonitor(Ref, [flush]),
-                    [simple_amqp_channel:stop(Pid) || Type == channel]
+  lists:foreach(fun({{Pid, _Ref}, client, _ChannelPid}) ->
+                    maybe_delete(Pid)
                 end,
-                ets_select('_', '_', '_')),
+                ets_select('_', '_', client)),
   lists:foreach(fun(Pid) ->
                     simple_amqp_connection:stop(Pid)
                 end, S#s.connection_handlers).
@@ -155,12 +154,12 @@ maybe_new(ClientPid, Connections) ->
       {error, no_connections}
   end.
 
-maybe_delete(Pid, Ops) ->
-  case ets_select(Pid, '_', client) of
-    [{{Pid, Ref}, client, ChannelPid}] ->
-      [{{ChannelPid, ChannelRef}, channel, Pid}] =
+maybe_delete(ClientPid) ->
+  case ets_select(ClientPid, '_', client) of
+    [{{ClientPid, ClientRef}, client, ChannelPid}] ->
+      [{{ChannelPid, ChannelRef}, channel, ClientPid}] =
         ets_select(ChannelPid, '_', channel),
-      ets_delete(Pid, Ref),
+      ets_delete(ClientPid,  ClientRef),
       ets_delete(ChannelPid, ChannelRef),
       simple_amqp_channel:stop(ChannelPid);
     [] -> ok
