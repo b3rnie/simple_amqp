@@ -48,7 +48,8 @@ handle_cast(stop, S) ->
 
 handle_info(timeout, #s{ connection = undefined
                        , brokers    = [{Type, Conf} | Brokers]} = S0) ->
-  error_logger:info_msg("trying to connect (~p)~n", [?MODULE]),
+  error_logger:info_msg("trying to connect (~p): ~p~n",
+                        [?MODULE, {Type, Conf}]),
   case amqp_connection:start(params(Type, Conf)) of
     {ok, Pid} ->
       %% xxx better logging
@@ -80,6 +81,7 @@ handle_info(Info, S) ->
   {noreply, S}.
 
 terminate(_Rsn, #s{connection = {Pid, Ref}}) ->
+  error_logger:info_msg("closing connection (~p): ~p~n", [?MODULE, Pid]),
   erlang:demonitor(Ref, [flush]),
   ok = amqp_connection:close(Pid);
 terminate(_Rsn, _S) ->

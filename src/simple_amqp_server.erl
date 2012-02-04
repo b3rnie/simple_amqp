@@ -117,6 +117,8 @@ handle_info(Info, S) ->
   {noreply, S}.
 
 terminate(_Rsn, S) ->
+  error_logger:info_msg("shutting down (~p): ~p~n",
+                        [?MODULE, S]),
   lists:foreach(fun({{Pid, Ref}, Type, _}) ->
                     erlang:demonitor(Ref, [flush]),
                     [simple_amqp_channel:stop(Pid) || Type == channel]

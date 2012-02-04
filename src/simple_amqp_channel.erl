@@ -81,6 +81,8 @@ handle_info(Info, S0) ->
   end.
 
 terminate(_Rsn, #s{channel = {Pid, Ref}}) ->
+  error_logger:info_msg("closing channel (~p): ~p~n",
+                        [?MODULE, Pid]),
   ok = amqp_channel:close(Pid),
   erlang:demonitor(Ref, [flush]).
 

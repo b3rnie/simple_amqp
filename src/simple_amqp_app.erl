@@ -9,7 +9,9 @@
 -behaviour(application).
 
 %%%_* Exports ==========================================================
--export([start/2, stop/1]).
+-export([ start/2
+        , prep_stop/1
+        , stop/1]).
 
 %%%_* Code =============================================================
 start(Type, []) ->
@@ -17,6 +19,10 @@ start(Type, []) ->
   start(Type, [{brokers, Brokers}]);
 start(_Type, Args) ->
   simple_amqp_sup:start_link(Args).
+
+prep_stop(State) ->
+  simple_amqp_server:stop(),
+  State.
 
 stop(_State) -> ok.
 
