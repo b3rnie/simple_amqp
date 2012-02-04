@@ -65,9 +65,6 @@ handle_info(timeout, #s{ connection = undefined
       {noreply, S0, ?retry_interval}
   end;
 
-handle_info(timeout, #s{connection = {_Pid, _Ref}} = S) ->
-  {noreply, S};
-
 handle_info({'DOWN', Ref, process, Pid, Rsn},
             #s{connection = {Pid, Ref}} = S) ->
   error_logger:info_msg("connection died (~p): ~p~n", [?MODULE, Rsn]),

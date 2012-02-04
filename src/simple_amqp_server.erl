@@ -73,15 +73,15 @@ handle_call({cmd, Cmd, Args}, {Pid, _} = From, S) ->
     {ok, {ChannelPid, Connections}} ->
       simple_amqp_channel:cmd(ChannelPid, Cmd, Args, From),
       {noreply, S#s{connections = Connections}};
-    {error, _Rsn} = E ->
-      {reply, E, S}
+    {error, Rsn} ->
+      {reply, {error, Rsn}, S}
   end;
 
 handle_call(open_connections, _From, S) ->
   {reply, length(S#s.connections), S};
 
 handle_call(cleanup, {Pid, _} = _From, S) ->
-  maybe_delete(Pid, [{stop_channel, true}]),
+  maybe_delete(Pid),
   {reply, ok, S}.
 
 handle_cast({add_connection, Pid}, S) ->
@@ -99,11 +99,11 @@ handle_info({'DOWN', Ref, process, Pid, Rsn}, S) ->
   case ets_select(Pid, Ref, '_') of
     [{{Pid, Ref}, channel, ClientPid}] ->
       error_logger:info_msg("channel died (~p): ~p~n", [?MODULE, Rsn]),
-      maybe_delete(ClientPid, [{stop_channel, false}]),
+      maybe_delete(ClientPid),
       {noreply, S};
     [{{Pid, Ref}, client, _ChannelPid}] ->
       error_logger:info_msg("client died (~p): ~p~n", [?MODULE, Rsn]),
-      maybe_delete(Pid, [{stop_channel, true}]),
+      maybe_delete(Pid),
       {noreply, S};
     [] ->
       error_logger:info_msg("weird down message, investigate (~p): "
@@ -117,8 +117,7 @@ handle_info(Info, S) ->
   {noreply, S}.
 
 terminate(_Rsn, S) ->
-  error_logger:info_msg("shutting down (~p): ~p~n",
-                        [?MODULE, S]),
+  error_logger:info_msg("shutting down (~p)~n", [?MODULE]),
   lists:foreach(fun({{Pid, Ref}, Type, _}) ->
                     erlang:demonitor(Ref, [flush]),
                     [simple_amqp_channel:stop(Pid) || Type == channel]
@@ -163,8 +162,7 @@ maybe_delete(Pid, Ops) ->
         ets_select(ChannelPid, '_', channel),
       ets_delete(Pid, Ref),
       ets_delete(ChannelPid, ChannelRef),
-      [simple_amqp_channel:stop(ChannelPid) ||
-        proplists:get_value(stop_channel, Ops)];
+      simple_amqp_channel:stop(ChannelPid);
     [] -> ok
   end.
 
