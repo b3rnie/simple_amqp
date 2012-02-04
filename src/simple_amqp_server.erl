@@ -27,18 +27,20 @@
 -include_lib("amqp_client/include/amqp_client.hrl").
 
 %%%_* Macros ===========================================================
+-define(tick, 1000).
 
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
--record(s, { clientpid_to_channel    %% dict
-           , channelpid_to_clientpid %% dict
-           , connection_pid          %% pid()
-           , connection_ref       %% monitor()
+-record(s, { channels %% dict clientpid  -> channel
+           , clients  %% dict channelpid -> clientpid
+           , connection %% {pid, ref}
+           , brokers
            }).
 
--record(channel, { pid %% pid()
-                 , ref %% monitor()
-                 }).
+-record(e, { pid
+           , ref
+           }).
+
 %%%_ * API -------------------------------------------------------------
 start(Args) ->
   gen_server:start({local, ?MODULE}, ?MODULE, Args, []).
@@ -52,59 +54,70 @@ cmd(Cmd, Args) -> call({cmd, Cmd, Args}).
 
 %%%_ * gen_server callbacks --------------------------------------------
 init(Args) ->
-  case connect(Args) of
-    {ok, Pid} ->
-      Ref = erlang:monitor(process, Pid),
-      {ok, #s{ clientpid_to_channel    = dict:new()
-             , channelpid_to_clientpid = dict:new()
-             , connection_pid          = Pid
-             , connection_ref          = Ref
-             }};
-    {error, Rsn} ->
-      {stop, Rsn}
-  end.
+  ets:new(?MODULE, [named_table, ordered_set]),
+  {ok, #s{brokers  = proplists:get_value(brokers, Args)}, 0}.
 
-handle_call({cmd, unsubscribe, Args}, {Pid, _} = From,
-            #s{clientpid_to_channel = CDict} = S) ->
-  case dict:find(Pid, CDict) of
-    {ok, #channel{pid = ChannelPid}} ->
+handle_call({cmd, unsubscribe, Args}, {Pid, _} = From, S) ->
+  case select({Pid, client, '_'}) of
+    [ChannelPid] ->
       simple_amqp_channel:cmd(ChannelPid, From, unsubscribe, Args),
-      {noreply, S};
-    error ->
-      {reply, {error, not_subscribed}, S}
+      {noreply, S, next_tick(S)};
+    [] ->
+      {reply, {error, not_subscribed}, S, next_tick(S)}
   end;
 
 handle_call({cmd, Cmd, Args}, {Pid, _} = From, S0) ->
-  {ChannelPid, S} = maybe_new(Pid, S0),
-  simple_amqp_channel:cmd(ChannelPid, From, Cmd, Args),
-  {noreply, S};
+  case maybe_new(Pid, S0) of
+    {ok, {ChannelPid, S}} ->
+      simple_amqp_channel:cmd(ChannelPid, From, Cmd, Args),
+      {noreply, S, next_tick(S)};
+    {error, Rsn} ->
+      {reply, {error, Rsn}, S0, next_tick(S)}
+  end
 
-handle_call(cleanup, {Pid, _} = _From,
-            #s{clientpid_to_channel = CDict} = S0) ->
-  case dict:is_key(Pid, CDict) of
-    true  -> {reply, ok, delete(Pid, S0)};
-    false -> {reply, ok, S0}
+handle_call(cleanup, {Pid, _} = _From, S0) ->
+  case select({Pid, client, '_'}) of
+    [_ChannelPid] -> {reply, ok, delete(Pid, S0), next_tick(S)};
+    []            -> {reply, ok, S0,              next_tick(S)}
   end.
 
 handle_cast(stop, S) ->
   {stop, normal, S}.
 
-handle_info({'DOWN', Ref, process, Pid, Rsn},
-            #s{ connection_pid = Pid
-              , connection_ref = Ref
-              } = S) ->
-  {stop, Rsn, S};
+handle_info(timeout, #s{ connection = undefined
+                       , brokers    = [{Type, Conf} | Brokers]} = S0) ->
+  case amqp_connection:start(params(Type, Conf)) of
+    {ok, Pid} ->
+      S = S0#s{ connection = {Pid, erlang:monitor(process, Pid)}
+              , brokers    = Brokers ++ [{Type, Conf}]},
+      {noreply, S, next_tick(S)};
+    {error, Rsn}        ->
+      error_logger:info_msg("Connect failed (~p,~p): ~p ~n",
+                            [?MODULE, {Type, Conf}, Rsn]),
+      {noreply, S0, next_tick(S0)}
+  end.
 
-handle_info({'DOWN', _Mon, process, Pid, Rsn},
-            #s{channelpid_to_clientpid = CDict} = S) ->
-  case dict:find(Pid, CDict) of
-    {ok, ChannelPid} ->
+handle_info(timeout, #s{connection = {_Pid, _Ref}} = S) ->
+  {noreply, S, next_tick(S)};
+
+handle_info({'DOWN', Ref, process, Pid, Rsn},
+            #s{connection = {Pid, Ref}} = S) ->
+  error_logger:info_msg("Connection died (~p): ~p~n", [?MODULE, Rsn]),
+  erlang:demonitor(Ref, [flush]),
+  {noreply, S#s{connection = undefined}, 0};
+
+handle_info({'DOWN', _Ref, process, _Pid, _Rsn} = Down, S) ->
+  case select({Pid, '_', Ref}) of
+    [{Pid, channel, Ref}] ->
       error_logger:info_msg("Channel died (~p): ~p~n", [?MODULE, Rsn]),
-      {noreply, delete(ChannelPid, S)};
+      {noreply, delete(ChannelPid, S), next_tick(S)};
+    [{Pid, client, Ref}] ->
+      error_logger:info_msg("Client died (~p): ~p~n", [?MODULE, Rsn]),
+      {noreply, delete(ChannelPid, S), next_tick(S)};
     error ->
       error_logger:info_msg("monitored process died, "
                             "investigate! (~p): ~p~n", [?MODULE, Rsn]),
-      {noreply, S}
+      {noreply, S, next_tick(S)}
   end;
 
 handle_info(_Info, S) ->
@@ -125,51 +138,40 @@ code_change(_OldVsn, S, _Extra) ->
   {ok, S}.
 
 %%%_ * Internals -------------------------------------------------------
-maybe_new(ClientPid, #s{ connection_pid          = ConnectionPid
-                       , clientpid_to_channel    = Channels0
-                       , channelpid_to_clientpid = Clients0} = S0) ->
-
-  case dict:find(ClientPid, Channels0) of
-    {ok, #channel{pid = ChannelPid}} ->
-      {ChannelPid, S0};
+maybe_new(ClientPid, S) ->
+  case dict:find(ClientPid, S#s.channels) of
+    {ok, #e{pid = ChannelPid}} ->
+      {ok, {ChannelPid, S}};
+    error when S#s.connection /= undefined ->
+      {ConnectionPid, _ConnectionRef} = S#s.connection,
+      {ok, ChannelPid}  = simple_amqp_channel:start(
+                            [ {connection_pid, ConnectionPid}
+                            , {client_pid,     ClientPid}]),
+      Channels = dict:store(ClientPid,  e(ChannelPid), S#s.channels),
+      Clients  = dict:store(ChannelPid, e(ClientPid),  S#s.clients),
+      {ok, {ChannelPid, S#s{ channels = Channels
+                           , clients  = Clients}}};
     error ->
-      Args = [ {connection_pid, ConnectionPid}
-             , {client_pid,     ClientPid}
-             ],
-      {ok, ChannelPid}  = simple_amqp_channel:start(Args),
-      ChannelRef        = erlang:monitor(process, ChannelPid),
-      Channel = #channel{ pid = ChannelPid
-                        , ref = ChannelRef},
-      Channels = dict:store(ClientPid,  Channel,   Channels0),
-      Clients  = dict:store(ChannelPid, ClientPid, Clients0),
-      {ChannelPid, S0#s{ clientpid_to_channel    = Channels
-                       , channelpid_to_clientpid = Clients}}
+      {error, no_connection}
   end.
 
-delete(ClientPid, #s{ clientpid_to_channel = Channels
-                    , channelpid_to_clientpid = Clients} = S) ->
-  #channel{ pid = ChannelPid
-          , ref = ChannelRef} = dict:fetch(ClientPid, Channels),
-  true = dict:is_key(ChannelPid, Clients),
-
+delete(ClientPid, Ops, S) ->
+  #e{pid = ChannelPid,
+     ref = ChannelRef} = dict:fetch(ClientPid, S#s.channels),
+  #e{pid = ClientPid,
+     ref = ClientRef} = dict:fetch(ChannelPid, S#s.clients),
   erlang:demonitor(ChannelRef, [flush]),
-  simple_amqp_channel:stop(ChannelPid),
-  S#s{ clientpid_to_channel    = dict:erase(ClientPid,  Channels)
-     , channelpid_to_clientpid = dict:erase(ChannelPid, Clients)}.
+  erlang:demonitor(ClientRef,  [flush]),
+  [simple_amqp_channel:stop(ChannelPid) || lists:member(stop, Ops)],
+  S#s{ channels = dict:erase(ClientPid,  S#s.channels)
+     , clients  = dict:erase(ChannelPid, S#s.clients)}.
 
-connect(Args) ->
-  do_connect(proplists:get_value(brokers, Args)).
+next_tick(_S) ->
+  ?tick.
 
-do_connect([]) -> {error, no_working_brokers};
-do_connect([{Type, Conf}|T]) ->
-  Params = params(Type, Conf),
-  case amqp_connection:start(Params) of
-    {ok, ConnectionPid} -> {ok, ConnectionPid};
-    {error, Rsn}        ->
-      error_logger:info_msg("Connect failed (~p,~p): ~p ~n",
-                            [?MODULE, Params, Rsn]),
-      do_connect(T)
-  end.
+e(Pid) ->
+  #e{ pid = Pid
+    , erlang:monitor(process, Pid)}.
 
 params(direct, Args) ->
   F = fun(K) -> proplists:get_value(K, Args) end,
