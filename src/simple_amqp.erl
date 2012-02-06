@@ -36,7 +36,8 @@
 subscribe(Queue) ->
   subscribe(Queue, []).
 
-subscribe(Queue, Ops) ->
+subscribe(Queue, Ops)
+  when is_binary(Queue) ->
   simple_amqp_server:cmd(subscribe, [Queue, Ops]).
 
 %% @spec unsubscribe(Queue::binary()) -> ok | {error, Rsn}
@@ -44,62 +45,78 @@ subscribe(Queue, Ops) ->
 unsubscribe(Queue) ->
   unsubscribe(Queue, []).
 
-unsubscribe(Queue, Ops) ->
+unsubscribe(Queue, Ops)
+  when is_binary(Queue) ->
   simple_amqp_server:cmd(unsubscribe, [Queue, Ops]).
 
-%% @spec unsubscribe(Exchange, RoutingKey) -> ok | {error, Rsn}
+%% @spec publish(Exchange, RoutingKey, Payload) -> ok
 %% @doc Publish a message
+%% xxx unroutable requests wont be handled very nicely
 publish(Exchange, RoutingKey, Payload) ->
   publish(Exchange, RoutingKey, Payload, []).
 
-publish(Exchange, RoutingKey, Payload, Ops) ->
+publish(Exchange, RoutingKey, Payload, Ops)
+  when is_binary(Exchange),
+       is_binary(RoutingKey),
+       is_binary(Payload) ->
   simple_amqp_server:cmd(publish,
                          [Exchange, RoutingKey, Payload, Ops]).
 
-%% @spec exchange_declare(Exchange) -> ok | {error, Rsn}
+%% @spec exchange_declare(Exchange) -> ok
 %% @doc declare a new exchange
 exchange_declare(Exchange) ->
   exchange_declare(Exchange, []).
 
-exchange_declare(Exchange, Ops) ->
+exchange_declare(Exchange, Ops)
+  when is_binary(Exchange) ->
   simple_amqp_server:cmd(exchange_declare, [Exchange, Ops]).
 
-%% @spec exchange_delete(Exchange) -> ok | {error, Rsn}
+%% @spec exchange_delete(Exchange) -> ok
 %% @doc delete an exchange
 exchange_delete(Exchange) ->
   exchange_delete(Exchange, []).
 
-exchange_delete(Exchange, Ops) ->
+exchange_delete(Exchange, Ops)
+  when is_binary(Exchange) ->
   simple_amqp_server:cmd(exchange_delete, [Exchange, Ops]).
 
-%% @spec queue_declare(Queue) -> {ok, Queue} | {error, Rsn}
+%% @spec queue_declare(Queue) -> {ok, Queue}
 %% @doc declare a new queue
 queue_declare(Queue) ->
   queue_declare(Queue, []).
 
-queue_declare(Queue, Ops) ->
+queue_declare(Queue, Ops)
+  when is_binary(Queue) ->
   simple_amqp_server:cmd(queue_declare, [Queue, Ops]).
 
-%% @spec queue_delete( Queue) -> ok | {error, Rsn}
+%% @spec queue_delete(Queue) -> ok
 %% @doc delete a queue
 queue_delete(Queue) ->
   queue_delete(Queue, []).
 
-queue_delete(Queue, Ops) ->
+queue_delete(Queue, Ops)
+  when is_binary(Queue) ->
   simple_amqp_server:cmd(queue_delete, [Queue, Ops]).
 
-%% @spec bind(Queue, Exchange, RoutingKey) -> ok | {error, Rsn}
+%% @spec bind(Queue, Exchange, RoutingKey) -> ok
 %% @doc create routing rule
-bind(Queue, Exchange, RoutingKey) ->
+bind(Queue, Exchange, RoutingKey)
+  when is_binary(Queue),
+       is_binary(Exchange),
+       is_binary(RoutingKey) ->
   simple_amqp_server:cmd(bind, [Queue, Exchange, RoutingKey]).
 
 %% @spec unbind(Queue, Exchange, RoutingKey) -> ok | {error, Rsn}
 %% @doc remove a routing rule
-unbind(Queue, Exchange, RoutingKey) ->
+unbind(Queue, Exchange, RoutingKey)
+  when is_binary(Queue),
+       is_binary(Exchange),
+       is_binary(RoutingKey) ->
   simple_amqp_server:cmd(unbind, [Queue, Exchange, RoutingKey]).
 
 %% @spec cleanup() -> ok
-%% @doc Cleanup after process
+%% @doc Explicitly leanup after process (done automatically when
+%%      'client' dies otherwise)
 cleanup() ->
   simple_amqp_server:cleanup().
 

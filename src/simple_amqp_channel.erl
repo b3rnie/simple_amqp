@@ -66,130 +66,9 @@ handle_call(sync, _From, S) ->
 handle_cast(stop, S) ->
   {stop, normal, S};
 
-handle_cast({cmd, subscribe, [Queue, Ops], From}, S) ->
-  case dict:find(Queue, S#s.subs) of
-    {ok, #sub{state = open}} ->
-      noreply(From, {ok, self()}, S);
-    {ok, #sub{state = {State, _From}}}
-      when State == setup;
-           State == close ->
-      noreply(From, {error_in_progress}, S);
-    error ->
-      Qos = #'basic.qos'{prefetch_count = 1},
-      #'basic.qos_ok'{} = amqp_channel:call(S#s.channel_pid, Qos),
-      Consume = #'basic.consume'{
-         queue        = Queue
-       , consumer_tag = Queue
-       , no_ack       = ops(no_ack,    Ops, false)
-       , exclusive    = ops(exclusive, Ops, false)
-       },
-      #'basic.consume_ok'{consumer_tag = Queue} =
-        amqp_channel:call(S#s.channel_pid, Consume),
-      Sub = #sub{state = {setup, From}},
-      {noreply, S#s{subs = dict:store(Queue, Sub, S#s.subs)}}
-  end;
-
-handle_cast({cmd, unsubscribe, [Queue, _Ops], From}, S) ->
-  case dict:find(Queue, S#s.subs) of
-    {ok, #sub{state = {State, _From}}}
-      when State == close;
-           State == setup ->
-      noreply(From, {error, in_progress}, S);
-    {ok, #sub{state = open} = Sub0} ->
-      Cancel = #'basic.cancel'{consumer_tag = Queue},
-      #'basic.cancel_ok'{} = amqp_channel:call(S#s.channel_pid, Cancel),
-      Sub = Sub0#sub{state = {close, From}},
-      {noreply, S#s{subs = dict:store(Queue, Sub, S#s.subs)}};
-    error ->
-      noreply(From, {error, not_subscribed}, S)
-  end;
-
-handle_cast({cmd, publish, [Exchange, RoutingKey, Payload, Ops], From},
-            S) ->
-  Publish = #'basic.publish'{
-     exchange    = Exchange
-   , routing_key = RoutingKey
-   , mandatory   = ops(mandatory, Ops, false) %%true
-   , immediate   = ops(immediate, Ops, false) %%true
-   },
-
-  Props = #'P_basic'{
-     delivery_mode  = ops(delivery_mode,  Ops, 2)  %% 1 not persistent,
-                                                   %% 2 persistent
-   , correlation_id = ops(correlation_id, Ops, undefined)
-   },
-  Msg = #amqp_msg{ payload = Payload
-                 , props   = Props
-                 },
-  ok = amqp_channel:cast(S#s.channel_pid, Publish, Msg),
-  noreply(From, ok, S);
-
-handle_cast({cmd, exchange_declare, [Exchange, Ops], From}, S) ->
-  Declare = #'exchange.declare'{
-     exchange    = Exchange
-   , ticket      = ops(ticket,      Ops, 0)
-   , type        = ops(type,        Ops, <<"direct">>)
-   , passive     = ops(passive,     Ops, false)
-   , durable     = ops(durable,     Ops, false)
-   , auto_delete = ops(auto_delete, Ops, false)
-   , internal    = ops(internal,    Ops, false)
-   , nowait      = ops(nowait,      Ops, false)
-   , arguments   = ops(arguments,   Ops, [])
-   },
-  #'exchange.declare_ok'{} =
-    amqp_channel:call(S#s.channel_pid, Declare),
-  noreply(From, ok, S);
-
-handle_cast({cmd, exchange_delete, [Exchange, Ops], From}, S) ->
-  Delete = #'exchange.delete'{
-     exchange  = Exchange
-   , ticket    = ops(ticket,    Ops, 0)
-   , if_unused = ops(if_unused, Ops, false)
-   , nowait    = ops(nowait,    Ops, false)
-   },
-  #'exchange.delete_ok'{} = amqp_channel:call(S#s.channel_pid, Delete),
-  noreply(From, ok, S);
-
-handle_cast({cmd, queue_declare, [Queue0, Ops], From}, S) ->
-  Declare = #'queue.declare'{
-     queue       = Queue0
-   , ticket      = ops(ticket,      Ops, 0)
-   , passive     = ops(passive,     Ops, false)
-   , exclusive   = ops(exclusive,   Ops, false)
-   , durable     = ops(durable,     Ops, false)
-   , auto_delete = ops(auto_delete, Ops, false)
-   , nowait      = ops(nowait,      Ops, false)
-   , arguments   = ops(arguments,   Ops, [])
-   },
-  #'queue.declare_ok'{queue = Queue} =
-    amqp_channel:call(S#s.channel_pid, Declare),
-  noreply(From, {ok, Queue}, S);
-
-handle_cast({cmd, queue_delete, [Queue, Ops], From}, S) ->
-  Delete = #'queue.delete'{
-     queue = Queue
-   , ticket    = ops(ticket, Ops, 0)
-   , if_unused = ops(if_unused, Ops, false)
-   , if_empty  = ops(if_empty,  Ops, false)
-   , nowait    = ops(nowait,    Ops, false)
-   },
-  #'queue.delete_ok'{message_count = _MessageCount} =
-    amqp_channel:call(S#s.channel_pid, Delete),
-  noreply(From, ok, S);
-
-handle_cast({cmd, bind, [Queue, Exchange, RoutingKey], From}, S) ->
-  Binding = #'queue.bind'{ queue       = Queue
-                         , exchange    = Exchange
-                         , routing_key = RoutingKey},
-  #'queue.bind_ok'{} = amqp_channel:call(S#s.channel_pid, Binding),
-  noreply(From, ok, S);
-
-handle_cast({cmd, unbind, [Queue, Exchange, RoutingKey], From}, S) ->
-  Binding = #'queue.unbind'{ queue       = Queue
-                           , exchange    = Exchange
-                           , routing_key = RoutingKey},
-  #'queue.unbind_ok'{} = amqp_channel:call(S#s.channel_pid, Binding),
-  noreply(From, ok, S).
+handle_cast({cmd, Cmd, Args, From}, S0) ->
+  S = safe_do_cmd(Cmd, Args, From, S0),
+  {noreply, S}.
 
 handle_info(#'basic.consume_ok'{consumer_tag = Queue}, S) ->
   error_logger:info_msg("basic consume (~p): tag = ~p~n",
@@ -260,6 +139,149 @@ code_change(_OldVsn, S, _Extra) ->
   {ok, S}.
 
 %%%_ * Internals -------------------------------------------------------
+safe_do_cmd(Cmd, Args, From, S) ->
+  try do_cmd(Cmd, Args, From, S)
+  catch Class:Term ->
+      gen_server:reply(From, {error, Term}),
+      S
+  end.
+
+do_cmd(subscribe, [Queue, Ops], From, S) ->
+  case dict:find(Queue, S#s.subs) of
+    {ok, #sub{state = open}} ->
+      gen_server:reply(From, {ok, self()}),
+      S;
+    {ok, #sub{state = {State, _From}}}
+      when State == setup;
+           State == close ->
+      gen_server:reply(From, {error, in_progress}),
+      S;
+    error ->
+      Qos = #'basic.qos'{prefetch_count = 1},
+      #'basic.qos_ok'{} = amqp_channel:call(S#s.channel_pid, Qos),
+      Consume = #'basic.consume'{
+         queue        = Queue
+       , consumer_tag = Queue
+       , no_ack       = ops(no_ack,    Ops, false)
+       , exclusive    = ops(exclusive, Ops, false)
+       },
+      #'basic.consume_ok'{consumer_tag = Queue} =
+        amqp_channel:call(S#s.channel_pid, Consume),
+      Sub = #sub{state = {setup, From}},
+      S#s{subs = dict:store(Queue, Sub, S#s.subs)}
+  end;
+
+do_cmd(unsubscribe, [Queue, _Ops], From, S) ->
+  case dict:find(Queue, S#s.subs) of
+    {ok, #sub{state = {State, _From}}}
+      when State == close;
+           State == setup ->
+      gen_server:reply(From, {error, in_progress}),
+      S;
+    {ok, #sub{state = open} = Sub0} ->
+      Cancel = #'basic.cancel'{consumer_tag = Queue},
+      #'basic.cancel_ok'{} = amqp_channel:call(S#s.channel_pid, Cancel),
+      Sub = Sub0#sub{state = {close, From}},
+      S#s{subs = dict:store(Queue, Sub, S#s.subs)};
+    error ->
+      gen_server:reply(From, {error, not_subscribed}),
+      S
+  end;
+
+do_cmd(publish, [Exchange, RoutingKey, Payload, Ops], From, S) ->
+  Publish = #'basic.publish'{
+     exchange    = Exchange
+   , routing_key = RoutingKey
+   , mandatory   = ops(mandatory, Ops, false) %%true
+   , immediate   = ops(immediate, Ops, false) %%true
+   },
+
+  Props = #'P_basic'{
+     delivery_mode  = ops(delivery_mode,  Ops, 2)  %% 1 not persistent,
+                                                   %% 2 persistent
+   , correlation_id = ops(correlation_id, Ops, undefined)
+   },
+  Msg = #amqp_msg{ payload = Payload
+                 , props   = Props
+                 },
+  ok = amqp_channel:call(S#s.channel_pid, Publish, Msg),
+  gen_server:reply(From, ok),
+  S;
+
+do_cmd(exchange_declare, [Exchange, Ops], From, S) ->
+  Declare = #'exchange.declare'{
+     exchange    = Exchange
+   , ticket      = ops(ticket,      Ops, 0)
+   , type        = ops(type,        Ops, <<"direct">>)
+   , passive     = ops(passive,     Ops, false)
+   , durable     = ops(durable,     Ops, false)
+   , auto_delete = ops(auto_delete, Ops, false)
+   , internal    = ops(internal,    Ops, false)
+   , nowait      = ops(nowait,      Ops, false)
+   , arguments   = ops(arguments,   Ops, [])
+   },
+  #'exchange.declare_ok'{} =
+    amqp_channel:call(S#s.channel_pid, Declare),
+  gen_server:reply(From, ok),
+  S;
+
+do_cmd(exchange_delete, [Exchange, Ops], From, S) ->
+  Delete = #'exchange.delete'{
+     exchange  = Exchange
+   , ticket    = ops(ticket,    Ops, 0)
+   , if_unused = ops(if_unused, Ops, false)
+   , nowait    = ops(nowait,    Ops, false)
+   },
+  #'exchange.delete_ok'{} = amqp_channel:call(S#s.channel_pid, Delete),
+  gen_server:reply(From, ok),
+  S;
+
+do_cmd(queue_declare, [Queue0, Ops], From, S) ->
+  Declare = #'queue.declare'{
+     queue       = Queue0
+   , ticket      = ops(ticket,      Ops, 0)
+   , passive     = ops(passive,     Ops, false)
+   , exclusive   = ops(exclusive,   Ops, false)
+   , durable     = ops(durable,     Ops, false)
+   , auto_delete = ops(auto_delete, Ops, false)
+   , nowait      = ops(nowait,      Ops, false)
+   , arguments   = ops(arguments,   Ops, [])
+   },
+  #'queue.declare_ok'{queue = Queue} =
+    amqp_channel:call(S#s.channel_pid, Declare),
+  gen_server:reply(From, {ok, Queue}),
+  S;
+
+do_cmd(queue_delete, [Queue, Ops], From, S) ->
+  Delete = #'queue.delete'{
+     queue = Queue
+   , ticket    = ops(ticket, Ops, 0)
+   , if_unused = ops(if_unused, Ops, false)
+   , if_empty  = ops(if_empty,  Ops, false)
+   , nowait    = ops(nowait,    Ops, false)
+   },
+  #'queue.delete_ok'{message_count = _MessageCount} =
+    amqp_channel:call(S#s.channel_pid, Delete),
+  gen_server:reply(From, ok),
+  S;
+
+do_cmd(bind, [Queue, Exchange, RoutingKey], From, S) ->
+  Binding = #'queue.bind'{ queue       = Queue
+                         , exchange    = Exchange
+                         , routing_key = RoutingKey},
+  #'queue.bind_ok'{} = amqp_channel:call(S#s.channel_pid, Binding),
+  gen_server:reply(From, ok),
+  S;
+
+do_cmd(unbind, [Queue, Exchange, RoutingKey], From, S) ->
+  Binding = #'queue.unbind'{ queue       = Queue
+                           , exchange    = Exchange
+                           , routing_key = RoutingKey},
+  #'queue.unbind_ok'{} = amqp_channel:call(S#s.channel_pid, Binding),
+  gen_server:reply(From, ok),
+  S.
+
+
 noreply(From, What, S) ->
   gen_server:reply(From, What),
   {noreply, S}.
