@@ -22,6 +22,7 @@
         ]).
 
 %%%_* Includes =========================================================
+-include_lib("simple_amqp/include/simple_amqp.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
 
 %%%_* Macros ===========================================================
@@ -205,17 +206,26 @@ handle_info(#'basic.cancel_ok'{consumer_tag = Queue}, S) ->
 
 handle_info({#'basic.deliver'{ consumer_tag = ConsumerTag
                              , delivery_tag = DeliveryTag
-                               %%, exchange     = Exchange
+                             , exchange     = Exchange
                              , routing_key  = RoutingKey},
              #amqp_msg{ payload = Payload
-                      , props   = #'P_basic'{ reply_to       = To
-                                            , correlation_id = Id}}},
-            S) ->
+                      , props   = Props}}, S) ->
   error_logger:info_msg("basic deliver (~p): ~p~n",
                         [?MODULE, ConsumerTag]),
+
+  #'P_basic'{ reply_to       = To
+            , correlation_id = Id} = Props,
   %% xxx figure out something nicer
-  S#s.client_pid ! {msg, self(), DeliveryTag, RoutingKey,
-                    Payload, To, Id},
+  Dlv = #simple_amqp_deliver{ pid            = self()
+                            , consumer_tag   = ConsumerTag
+                            , delivery_tag   = DeliveryTag
+                            , exchange       = Exchange
+                            , routing_key    = RoutingKey
+                            , payload        = Payload
+                            , reply_to       = To
+                            , correlation_id = Id
+                            },
+  S#s.client_pid ! Dlv,
   {noreply, S};
 
 handle_info({#'basic.return'{ reply_text = <<"unroutable">>
@@ -224,7 +234,7 @@ handle_info({#'basic.return'{ reply_text = <<"unroutable">>
   %% slightly drastic for now.
   {stop, {unroutable, Exchange, Payload}, S};
 
-handle_info({ack, Tag}, S) ->
+handle_info(#simple_amqp_ack{delivery_tag = Tag}, S) ->
   Ack = #'basic.ack'{delivery_tag = Tag},
   amqp_channel:cast(S#s.channel_pid, Ack),
   {noreply, S};

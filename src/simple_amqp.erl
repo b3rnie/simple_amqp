@@ -26,6 +26,8 @@
         , unbind/3
         , cleanup/0
         ]).
+%%%_* Includes =========================================================
+-include_lib("simple_amqp/include/simple_amqp.hrl").
 
 %%%_ * API -------------------------------------------------------------
 %% @spec subscribe(Queue) -> {ok, Pid::pid()} | {error, Rsn}
@@ -142,8 +144,11 @@ basic_consumer(Daddy, Queue) ->
 basic_consumer_consume(Pid, []) -> ok;
 basic_consumer_consume(Pid, Dataset) ->
   receive
-    {msg, Pid, DeliveryTag, _RK, Payload, _To, _Id} ->
-      Pid ! {ack, DeliveryTag},
+    #simple_amqp_deliver{ pid          = Pid
+                        , delivery_tag = DeliveryTag
+                        , payload      = Payload
+                        } ->
+      Pid ! #simple_amqp_ack{delivery_tag = DeliveryTag},
       basic_consumer_consume(Pid, Dataset -- [Payload])
   end.
 
