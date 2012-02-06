@@ -142,7 +142,8 @@ basic_consumer(Daddy, Queue) ->
 basic_consumer_consume(Pid, []) -> ok;
 basic_consumer_consume(Pid, Dataset) ->
   receive
-    {msg, Pid, DeliveryTag, _RK, Payload} ->      Pid ! {ack, DeliveryTag},
+    {msg, Pid, DeliveryTag, _RK, Payload, _To, _Id} ->
+      Pid ! {ack, DeliveryTag},
       basic_consumer_consume(Pid, Dataset -- [Payload])
   end.
 

@@ -112,8 +112,11 @@ handle_cast({cmd, publish, [Exchange, RoutingKey, Payload, Ops], From},
    , immediate   = ops(immediate, Ops, false) %%true
    },
 
-  Props = #'P_basic'{delivery_mode = 2}, %% 1 not persistent
-                                         %% 2 persistent
+  Props = #'P_basic'{
+     delivery_mode  = ops(delivery_mode,  Ops, 2)  %% 1 not persistent,
+                                                   %% 2 persistent
+   , correlation_id = ops(correlation_id, Ops, undefined)
+   },
   Msg = #amqp_msg{ payload = Payload
                  , props   = Props
                  },
@@ -204,10 +207,15 @@ handle_info({#'basic.deliver'{ consumer_tag = ConsumerTag
                              , delivery_tag = DeliveryTag
                                %%, exchange     = Exchange
                              , routing_key  = RoutingKey},
-             #amqp_msg{payload = Payload}}, S) ->
+             #amqp_msg{ payload = Payload
+                      , props   = #'P_basic'{ reply_to       = To
+                                            , correlation_id = Id}}},
+            S) ->
   error_logger:info_msg("basic deliver (~p): ~p~n",
                         [?MODULE, ConsumerTag]),
-  S#s.client_pid ! {msg, self(), DeliveryTag, RoutingKey, Payload},
+  %% xxx figure out something nicer
+  S#s.client_pid ! {msg, self(), DeliveryTag, RoutingKey,
+                    Payload, To, Id},
   {noreply, S};
 
 handle_info({#'basic.return'{ reply_text = <<"unroutable">>
