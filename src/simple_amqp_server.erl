@@ -197,6 +197,26 @@ ets_delete(Pid, Ref) ->
 
 call(Args) -> gen_server:call(?MODULE, Args).
 cast(Args) -> gen_server:cast(?MODULE, Args).
+%%%_* Tests ============================================================
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+ets_test() ->
+  ets:new(?MODULE, [named_table, ordered_set, private]),
+  [] = ets_select(foo, bar, baz),
+  Pid = self(),
+  ets_insert(Pid, client,  Pid),
+  ets_insert(Pid, channel, Pid),
+  ets_insert(Pid, connection, Pid),
+  [{{Pid, Ref1}, client, Pid}]     = ets_select(Pid, '_', client),
+  [{{Pid, Ref2}, channel, Pid}]    = ets_select(Pid, '_', channel),
+  [{{Pid, Ref3}, connection, Pid}] = ets_select(Pid, '_', connection),
+  ok = try_delete(Pid, Ref1, client),
+  {error, no_pid} = try_delete(Pid, Ref1, client),
+  ok = try_delete(Pid, Ref3, connection),
+  ets:delete(?MODULE).
+-else.
+-endif.
+
 %%%_* Emacs ============================================================
 %%% Local Variables:
 %%% allout-layout: t
