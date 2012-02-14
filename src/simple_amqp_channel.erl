@@ -203,6 +203,7 @@ do_cmd(publish, [Exchange, RoutingKey, Payload, Ops], From, S) ->
                                                    %% 2 persistent
    , correlation_id = ops(correlation_id, Ops, undefined)
    , message_id     = ops(message_id, Ops, <<0>>)
+   , reply_to       = ops(reply_to, Ops, undefined)
    },
 
   Msg = #amqp_msg{ payload = Payload
