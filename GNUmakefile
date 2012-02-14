@@ -5,7 +5,7 @@ all:
 	./rebar compile
 
 docs:
-	./rebar doc
+	@:
 
 check:
 	./rebar check-plt

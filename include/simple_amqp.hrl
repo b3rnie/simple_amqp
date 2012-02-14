@@ -8,6 +8,7 @@
                              , payload
                              , reply_to
                              , correlation_id
+                             , message_id
                              }).
 
 -record(simple_amqp_ack, {delivery_tag}).

@@ -93,7 +93,8 @@ handle_info({#'basic.deliver'{ consumer_tag = ConsumerTag
                         [?MODULE, ConsumerTag]),
 
   #'P_basic'{ reply_to       = To
-            , correlation_id = Id} = Props,
+            , correlation_id = Id
+            , message_id     = MsgId} = Props,
   %% xxx figure out something nicer
   Dlv = #simple_amqp_deliver{ pid            = self()
                             , consumer_tag   = ConsumerTag
@@ -103,6 +104,7 @@ handle_info({#'basic.deliver'{ consumer_tag = ConsumerTag
                             , payload        = Payload
                             , reply_to       = To
                             , correlation_id = Id
+                            , message_id     = MsgId
                             },
   S#s.client_pid ! Dlv,
   {noreply, S};
@@ -200,7 +202,9 @@ do_cmd(publish, [Exchange, RoutingKey, Payload, Ops], From, S) ->
      delivery_mode  = ops(delivery_mode,  Ops, 2)  %% 1 not persistent,
                                                    %% 2 persistent
    , correlation_id = ops(correlation_id, Ops, undefined)
+   , message_id     = ops(message_id, Ops, <<0>>)
    },
+
   Msg = #amqp_msg{ payload = Payload
                  , props   = Props
                  },
@@ -280,7 +284,6 @@ do_cmd(unbind, [Queue, Exchange, RoutingKey], From, S) ->
   #'queue.unbind_ok'{} = amqp_channel:call(S#s.channel_pid, Binding),
   gen_server:reply(From, ok),
   S.
-
 
 noreply(From, What, S) ->
   gen_server:reply(From, What),

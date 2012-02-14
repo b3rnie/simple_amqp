@@ -140,8 +140,9 @@ basic_test() ->
                                  end),
   receive {ok, Consumer} -> ok end,
   ok = basic_close(Exchange, Queue, RK),
-  ok = simple_amqp:cleanup(),
-  ok = simple_amqp:cleanup(),
+  lists:foreach(fun(_Pid) ->
+                    ok = simple_amqp:cleanup()
+                end, [Daddy, Consumer, Producer]),
   application:stop(?MODULE),
   ok.
 
@@ -158,12 +159,13 @@ basic_consumer(Daddy, Queue) ->
   {error, not_subscribed} = simple_amqp:unsubscribe(Queue),
   Daddy ! {ok, self()}.
 
-basic_consumer_consume(Pid, []) -> ok;
+basic_consumer_consume(_Pid, []) -> ok;
 basic_consumer_consume(Pid, Dataset) ->
   receive
     #simple_amqp_deliver{ pid          = Pid
                         , delivery_tag = DeliveryTag
                         , payload      = Payload
+                        , message_id   = _MsgId
                         } ->
       Pid ! #simple_amqp_ack{delivery_tag = DeliveryTag},
       basic_consumer_consume(Pid, Dataset -- [Payload])
