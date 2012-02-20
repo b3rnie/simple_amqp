@@ -96,11 +96,13 @@ params(direct, Args) ->
 
 params(network, Args) ->
   F = fun(K) -> proplists:get_value(K, Args) end,
+  F2 = fun(K, Def) -> proplists:get_value(K, Args, Def) end,
   #amqp_params_network{ username     = F(username)
                       , password     = F(password)
                       , virtual_host = F(virtual_host)
                       , host         = F(host)
                       , port         = F(port)
+                      , heartbeat    = F2(heartbeat, 0)
                       }.
 
 %%%_* Emacs ============================================================
