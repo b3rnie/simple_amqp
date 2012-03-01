@@ -150,16 +150,13 @@ maybe_new(ClientPid, Connections) ->
     [{{ClientPid, _Ref}, client, ChannelPid}] ->
       {ok, {ChannelPid, Connections}};
     [] when Connections /= [] ->
-      case simple_amqp_channel:start(
-             [ {connection_pid, hd(Connections)}
-             , {client_pid,     ClientPid}]) of
-        {ok, ChannelPid} ->
-          ets_insert(ClientPid,  client,  ChannelPid),
-          ets_insert(ChannelPid, channel, ClientPid),
-          {ok, {ChannelPid, tl(Connections) ++ [hd(Connections)]}};
-        {error, Rsn} ->
-          {error, Rsn}
-      end;
+      {ok, ChannelPid} = simple_amqp_channel:start(
+                           [ {connection_pid, hd(Connections)}
+                           , {client_pid,     ClientPid}]),
+      simple_amqp_channel:open(ChannelPid),
+      ets_insert(ClientPid,  client,  ChannelPid),
+      ets_insert(ChannelPid, channel, ClientPid),
+      {ok, {ChannelPid, tl(Connections) ++ [hd(Connections)]}};
     [] when Connections == [] ->
       {error, no_connections}
   end.

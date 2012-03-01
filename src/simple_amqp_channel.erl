@@ -6,9 +6,11 @@
 
 %%%_* Module declaration ===============================================
 -module(simple_amqp_channel).
+-behaviour(gen_server).
 
 %%%_* Exports ==========================================================
 -export([ start/1
+        , open/1
         , stop/1
         , cmd/4
         ]).
@@ -29,7 +31,8 @@
 
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
--record(s, { client_pid %% pid()
+-record(s, { connection_pid
+           , client_pid %% pid()
            , channel_pid
            , channel_ref
            , subs       %% dict()
@@ -41,8 +44,8 @@
              }).
 
 %%%_ * API -------------------------------------------------------------
-start(Args) -> gen_server:start(?MODULE, Args, []).
-
+start(Args)               -> gen_server:start(?MODULE, Args, []).
+open(Pid)                 -> cast(Pid, open).
 stop(Pid)                 -> cast(Pid, stop).
 cmd(Pid, Cmd, Args, From) -> cast(Pid, {cmd, Cmd, Args, From}).
 
@@ -50,32 +53,33 @@ cmd(Pid, Cmd, Args, From) -> cast(Pid, {cmd, Cmd, Args, From}).
 init(Args) ->
   ConnectionPid = proplists:get_value(connection_pid, Args),
   ClientPid     = proplists:get_value(client_pid, Args),
+  {ok, #s{ connection_pid = ConnectionPid
+         , client_pid     = ClientPid
+         , subs           = dict:new()
+         , pubs           = dict:new()
+         , next_pubno     = 1}}.
 
+handle_call(sync, _From, S) ->
+  {reply, ok, S}.
+
+handle_cast(open, #s{connection_pid = ConnectionPid} = S) ->
   case amqp_connection:open_channel(ConnectionPid) of
     {ok, ChannelPid} ->
       #'confirm.select_ok'{} =
         amqp_channel:call(ChannelPid, #'confirm.select'{}),
       ok = amqp_channel:register_confirm_handler(ChannelPid, self()),
-      {ok, #s{ client_pid  = ClientPid
-             , channel_pid = ChannelPid
-             , channel_ref = erlang:monitor(process, ChannelPid)
-             , subs        = dict:new()
-             , pubs        = dict:new()
-             , next_pubno  = 1
-             }};
+      {noreply, S#s{ channel_pid = ChannelPid
+                   , channel_ref = erlang:monitor(process, ChannelPid)}};
     {error, Rsn} ->
-      {stop, Rsn}
-  end.
-
-handle_call(sync, _From, S) ->
-  {reply, ok, S}.
-
-handle_cast(stop, S) ->
-  {stop, normal, S};
+      {stop, Rsn, S}
+  end;
 
 handle_cast({cmd, Cmd, Args, From}, S0) ->
   S = safe_do_cmd(Cmd, Args, From, S0),
-  {noreply, S}.
+  {noreply, S};
+
+handle_cast(stop, S) ->
+  {stop, normal, S}.
 
 handle_info(#'basic.consume_ok'{consumer_tag = Queue}, S) ->
   error_logger:info_msg("basic consume (~p): tag = ~p~n",
