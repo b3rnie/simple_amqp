@@ -33,6 +33,8 @@
            , channel_pid
            , channel_ref
            , subs       %% dict()
+           , pubs       %% dict()
+           , next_pubno
            }).
 
 -record(sub, { state %% {setup, From} open, {close, From}
@@ -51,10 +53,15 @@ init(Args) ->
 
   case amqp_connection:open_channel(ConnectionPid) of
     {ok, ChannelPid} ->
+      #'confirm.select_ok'{} =
+        amqp_channel:call(ChannelPid, #'confirm.select'{}),
+      ok = amqp_channel:register_confirm_handler(ChannelPid, self()),
       {ok, #s{ client_pid  = ClientPid
              , channel_pid = ChannelPid
              , channel_ref = erlang:monitor(process, ChannelPid)
              , subs        = dict:new()
+             , pubs        = dict:new()
+             , next_pubno  = 1
              }};
     {error, Rsn} ->
       {stop, Rsn}
@@ -114,6 +121,11 @@ handle_info({#'basic.return'{ reply_text = <<"unroutable">>
   error_logger:error_msg("unroutable (~p): ~p", [?MODULE, Exchange]),
   %% slightly drastic for now.
   {stop, {unroutable, Exchange, Payload}, S};
+
+handle_info(#'basic.ack'{delivery_tag = Tag}, S) ->
+  From = dict:fetch(Tag, S#s.pubs),
+  gen_server:reply(From, ok),
+  {noreply, S#s{pubs = dict:erase(Tag, S#s.pubs)}};
 
 handle_info(#simple_amqp_ack{delivery_tag = Tag}, S) ->
   Ack = #'basic.ack'{delivery_tag = Tag},
@@ -209,9 +221,9 @@ do_cmd(publish, [Exchange, RoutingKey, Payload, Ops], From, S) ->
   Msg = #amqp_msg{ payload = Payload
                  , props   = Props
                  },
-  ok = amqp_channel:call(S#s.channel_pid, Publish, Msg),
-  gen_server:reply(From, ok),
-  S;
+  ok = amqp_channel:cast(S#s.channel_pid, Publish, Msg),
+  S#s{ next_pubno = S#s.next_pubno+1
+     , pubs       = dict:store(S#s.next_pubno, From, S#s.pubs)};
 
 do_cmd(exchange_declare, [Exchange, Ops], From, S) ->
   Declare = #'exchange.declare'{
