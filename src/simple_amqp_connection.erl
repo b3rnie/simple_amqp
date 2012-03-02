@@ -1,11 +1,12 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%% @doc simple amqp server
+%%% @doc
 %%% @copyright 2011 Bjorn Jensen-Urstad
 %%% @end
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %%%_* Module declaration ===============================================
 -module(simple_amqp_connection).
+-behaviour(gen_server).
 
 %%%_* Exports ==========================================================
 -export([ start_link/1
@@ -46,8 +47,8 @@ init(Args) ->
 handle_call(sync, _From, S) ->
   {reply, ok, S, 0}.
 
-handle_cast({connect, N}, S) ->
-  {noreply, S#s{connections = S#s.connections + N}, 0};
+handle_cast({connect, N}, #s{connections = Connections} = S) ->
+  {noreply, S#s{connections = Connections + N}, 0};
 
 handle_cast(stop, S) ->
   {stop, normal, S}.
@@ -55,8 +56,9 @@ handle_cast(stop, S) ->
 handle_info(timeout, #s{connections = 0} = S) ->
   {noreply, S};
 
-handle_info(timeout, #s{brokers = [{Type, Conf} | Brokers]} = S0) ->
-  true = S0#s.connections > 0,
+handle_info(timeout, #s{ brokers     = [{Type, Conf} | Brokers]
+                       , connections = Connections} = S0)
+  when Connections > 0 ->
   error_logger:info_msg("trying to connect (~p): ~p~n",
                         [?MODULE, {Type, Conf}]),
   case amqp_connection:start(params(Type, Conf)) of
@@ -64,14 +66,14 @@ handle_info(timeout, #s{brokers = [{Type, Conf} | Brokers]} = S0) ->
       %% xxx better logging
       error_logger:info_msg("connect successful (~p): ~p~n",
                             [?MODULE, Pid]),
-      S = S0#s{ connections = S0#s.connections - 1
-              , brokers     = [{Type, Conf} | Brokers]},
+      S = S0#s{ connections = Connections - 1
+              , brokers     = [{Type,Conf} | Brokers]},
       simple_amqp_server:add_connection(Pid),
       {noreply, S, 0};
     {error, Rsn} ->
       error_logger:error_msg("connect failed (~p): ~p~n",
                              [?MODULE, Rsn]),
-      {noreply, S0#s{brokers = Brokers ++ [{Type, Conf}]},
+      {noreply, S0#s{brokers = Brokers ++ [{Type,Conf}]},
        ?retry_interval}
   end;
 

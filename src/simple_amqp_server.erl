@@ -6,6 +6,7 @@
 
 %%%_* Module declaration ===============================================
 -module(simple_amqp_server).
+-behaviour(gen_server).
 
 %%%_* Exports ==========================================================
 -export([ start_link/1
