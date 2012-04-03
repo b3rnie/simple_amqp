@@ -37,6 +37,7 @@
            , channel_ref
            , subs       %% dict()
            , pubs       %% dict()
+           , seen_pubno
            , next_pubno
            }).
 
@@ -56,8 +57,10 @@ init(Args) ->
   {ok, #s{ connection_pid = ConnectionPid
          , client_pid     = ClientPid
          , subs           = dict:new()
-         , pubs           = dict:new()
-         , next_pubno     = 1}}.
+         , pubs           = []
+         , next_pubno     = 1
+         , seen_pubno     = 0
+         }}.
 
 handle_call(sync, _From, S) ->
   {reply, ok, S}.
@@ -86,13 +89,15 @@ handle_info(#'basic.consume_ok'{consumer_tag = Queue}, S) ->
                         [?MODULE, Queue]),
   #sub{state = {setup, From}} = Sub = dict:fetch(Queue, S#s.subs),
   Subs = dict:store(Queue, Sub#sub{state = open}, S#s.subs),
-  noreply(From, {ok, self()}, S#s{subs = Subs});
+  gen_server:reply(From, {ok, self()}),
+  {noreply, S#s{subs = Subs}};
 
 handle_info(#'basic.cancel_ok'{consumer_tag = Queue}, S) ->
   error_logger:info_msg("basic.cancel_ok (~p): ~p~n",
                         [?MODULE, Queue]),
   #sub{state = {close, From}} = dict:fetch(Queue, S#s.subs),
-  noreply(From, ok, S#s{subs = dict:erase(Queue, S#s.subs)});
+  gen_server:reply(From, ok),
+  {noreply, S#s{subs = dict:erase(Queue, S#s.subs)}};
 
 handle_info({#'basic.deliver'{ consumer_tag = ConsumerTag
                              , delivery_tag = DeliveryTag
@@ -126,10 +131,17 @@ handle_info({#'basic.return'{ reply_text = <<"unroutable">>
   %% slightly drastic for now.
   {stop, {unroutable, Exchange, Payload}, S};
 
-handle_info(#'basic.ack'{delivery_tag = Tag}, S) ->
-  From = dict:fetch(Tag, S#s.pubs),
-  gen_server:reply(From, ok),
-  {noreply, S#s{pubs = dict:erase(Tag, S#s.pubs)}};
+handle_info(#'basic.ack'{ delivery_tag = Tag
+                        , multiple     = Multiple
+                        }, S0) ->
+  S = respond_pubs(ok, Tag, Multiple, S0),
+  {noreply, S};
+
+handle_info(#'basic.nack'{ delivery_tag = Tag
+                         , multiple     = Multiple
+                         }, S0) ->
+  S = respond_pubs(error, Tag, Multiple, S0),
+  {noreply, S};
 
 handle_info(#simple_amqp_ack{delivery_tag = Tag}, S) ->
   Ack = #'basic.ack'{delivery_tag = Tag},
@@ -227,7 +239,8 @@ do_cmd(publish, [Exchange, RoutingKey, Payload, Ops], From, S) ->
                  },
   ok = amqp_channel:cast(S#s.channel_pid, Publish, Msg),
   S#s{ next_pubno = S#s.next_pubno+1
-     , pubs       = dict:store(S#s.next_pubno, From, S#s.pubs)};
+     , pubs       = [{S#s.next_pubno, From} | S#s.pubs]
+     };
 
 do_cmd(exchange_declare, [Exchange, Ops], From, S) ->
   Declare = #'exchange.declare'{
@@ -302,9 +315,20 @@ do_cmd(unbind, [Queue, Exchange, RoutingKey], From, S) ->
   gen_server:reply(From, ok),
   S.
 
-noreply(From, What, S) ->
-  gen_server:reply(From, What),
-  {noreply, S}.
+respond_pubs(What, Tag, true = _Multiple, S) ->
+  Pubs = lists:filter(fun({ Id, _From}) when Id > Tag -> true;
+                         ({_Id,  From}) ->
+                          gen_server:reply(From, What),
+                          false
+                      end, S#s.pubs),
+  S#s{pubs = Pubs};
+
+respond_pubs(What, Tag, false = _Multiple, S) ->
+  case lists:keytake(Tag, 1, S#s.pubs) of
+    {value, {Tag, From}, Pubs} -> gen_server:reply(From, What),
+                                  S#s{pubs = Pubs};
+    false ->                      S
+  end.
 
 ops(K,Ops,Def) -> proplists:get_value(K, Ops, Def).
 
